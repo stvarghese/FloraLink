@@ -1,0 +1,44 @@
+# ESP-IDF / FloraLink .gitignore
+
+# Build output
+build/
+*.elf
+*.bin
+*.map
+*.o
+*.d
+*.a
+*.gcda
+*.gcno
+*.gcov
+
+# ESP-IDF generated files
+sdkconfig
+sdkconfig.old
+config/
+project_description.json
+
+# Partition tables and bootloader artifacts
+partition_table/
+bootloader/
+bootloader-prefix/
+
+# Logs and temporary files
+log/
+*.log
+*.tmp
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.sublime*
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Managed components (if you want to fetch on build, otherwise remove this line)
+# managed_components/
+
+# Credentials/secrets (add patterns if you have any)

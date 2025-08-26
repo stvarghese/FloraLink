@@ -30,6 +30,9 @@
 #include "esp_log.h"
 #include "sdkconfig.h"
 
+#include "webserver/webserver.h"
+#include "wifi_setup.h"
+
 static const char *TAG = "FloraLink";
 
 /**
@@ -59,6 +62,11 @@ static void led_task(void *pvParameters)
 static void distance_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Distance task started");
+    if (wifi_setup() != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to connect to Wi-Fi");
+        vTaskDelete(NULL);
+    }
     while (1)
     {
         uint32_t distance = 0;
@@ -66,6 +74,8 @@ static void distance_task(void *pvParameters)
         if (measure_result == ESP_OK)
         {
             ESP_LOGI(TAG, "Measured distance: %d cm", distance);
+            // Publish the distance to the webserver module
+            webserver_publish_distance(distance);
         }
         else
         {
@@ -90,6 +100,11 @@ static void init_task(void *pvParameters)
     if (distance_init() != ESP_OK)
     {
         ESP_LOGE(TAG, "Failed to initialize distance sensor");
+        vTaskDelete(NULL);
+    }
+    if (webserver_init() != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to start webserver");
         vTaskDelete(NULL);
     }
     blink_init();

@@ -1,3 +1,18 @@
+
+menu "WiFi Configuration"
+    config WIFI_SSID
+        string "WiFi SSID"
+        default "YOUR_SSID"
+        help
+            Enter the SSID of the WiFi network to connect to.
+
+    config WIFI_PASS
+        string "WiFi Password"
+        default "YOUR_PASSWORD"
+        help
+            Enter the password for the WiFi network.
+endmenu
+
 menu "FloraLink Configuration"
 
     orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"

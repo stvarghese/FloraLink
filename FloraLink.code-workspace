@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "C:/Users/stvar/esp/v5.5/esp-idf/components"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"gpio.h": "c",
+			"esp_intr_alloc.h": "c",
+			"esp_err.h": "c",
+			"esp_log.h": "c",
+			"esp_wifi.h": "c",
+			"hcsr04_driver.h": "c"
+		}
+	}
+}

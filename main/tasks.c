@@ -1,4 +1,3 @@
-
 /**
  * @file tasks.c
  * @brief Main application task management for the ESP32 project.
@@ -62,28 +61,23 @@ static void led_task(void *pvParameters)
 static void distance_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Distance task started");
-    if (wifi_setup() != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Failed to connect to Wi-Fi");
-        vTaskDelete(NULL);
-    }
     while (1)
     {
         uint32_t distance = 0;
         esp_err_t measure_result = distance_measure(400, &distance);
         if (measure_result == ESP_OK)
         {
-            ESP_LOGI(TAG, "Measured distance: %d cm", distance);
-            // Publish the distance to the webserver module
-            webserver_publish_distance(distance);
+            distance_publish(PUB_LOG, distance);
+            distance_publish(PUB_WEBSERVER, distance);
         }
         else
         {
-            ESP_LOGE(TAG, "Failed to measure distance: %s, code: 0x%X", esp_err_to_name(measure_result), measure_result);
+            distance_publish_err(PUB_LOG, measure_result);
+            distance_publish_err(PUB_WEBSERVER, measure_result);
         }
         // Generate a test pulse for RMT monitor (4us low, 10us high)
         // misc_test_function();
-        vTaskDelay(2000 / portTICK_PERIOD_MS);
+        vTaskDelay(500 / portTICK_PERIOD_MS);
     }
 }
 
@@ -97,6 +91,11 @@ static void distance_task(void *pvParameters)
 static void init_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Init task started");
+    if (wifi_setup() != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to connect to Wi-Fi");
+        vTaskDelete(NULL);
+    }
     if (distance_init() != ESP_OK)
     {
         ESP_LOGE(TAG, "Failed to initialize distance sensor");

@@ -1,5 +1,3 @@
-
-
 /**
  * @file distance.h
  * @brief Public API for ultrasonic distance measurement module.
@@ -29,6 +27,15 @@
 
 #include <stdint.h>
 #include "esp_err.h"
+
+typedef enum
+{
+    PUB_LOG,
+    PUB_WEBSERVER
+} pub_t;
+
+void distance_publish(pub_t publisher, uint32_t distance);
+void distance_publish_err(pub_t publisher, esp_err_t result);
 
 /**
  * @brief Initialize the ultrasonic sensor hardware.

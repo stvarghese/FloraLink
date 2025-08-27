@@ -1,4 +1,3 @@
-
 /**
  * @file distance.c
  * @brief Ultrasonic distance measurement module.
@@ -13,8 +12,35 @@
  */
 
 #include "distance.h"
+#include "webserver/webserver.h"
 #include "hcsr04_driver.h"
 #include "esp_log.h"
+
+static const char *TAG = "Ultrasonic";
+
+void distance_publish(pub_t publisher, uint32_t distance)
+{
+    if (publisher == PUB_LOG)
+    {
+        ESP_LOGI(TAG, "Measured distance: %d cm", distance);
+    }
+    else if (publisher == PUB_WEBSERVER)
+    {
+        webserver_publish_distance(distance);
+    }
+}
+
+void distance_publish_err(pub_t publisher, esp_err_t result)
+{
+    if (publisher == PUB_LOG)
+    {
+        ESP_LOGE(TAG, "Failed to measure distance: %s, code: 0x%X", esp_err_to_name(result), result);
+    }
+    else if (publisher == PUB_WEBSERVER)
+    {
+        webserver_publish_error((int32_t)result);
+    }
+}
 
 /**
  * @brief Initialize the ultrasonic sensor hardware.

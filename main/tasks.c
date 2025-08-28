@@ -28,6 +28,8 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "sdkconfig.h"
+#include "esp_system.h"
+#include "esp_cpu.h"
 
 #include "webserver/webserver.h"
 #include "wifi_setup.h"
@@ -43,7 +45,7 @@ static const char *TAG = "FloraLink";
  */
 static void led_task(void *pvParameters)
 {
-    ESP_LOGI(TAG, "LED task started");
+    ESP_LOGI(TAG, "LED task started, on core %d", xPortGetCoreID());
     while (1)
     {
         blink_toggle();
@@ -60,14 +62,14 @@ static void led_task(void *pvParameters)
  */
 static void distance_task(void *pvParameters)
 {
-    ESP_LOGI(TAG, "Distance task started");
+    ESP_LOGI(TAG, "Distance task started, on core %d", xPortGetCoreID());
     while (1)
     {
         uint32_t distance = 0;
         esp_err_t measure_result = distance_measure(400, &distance);
         if (measure_result == ESP_OK)
         {
-            distance_publish(PUB_LOG, distance);
+            // distance_publish(PUB_LOG, distance);
             distance_publish(PUB_WEBSERVER, distance);
         }
         else
@@ -81,6 +83,26 @@ static void distance_task(void *pvParameters)
     }
 }
 
+void monitor_task_1s(void *arg)
+{
+    ESP_LOGI(TAG, "monitor_task_1s started, on core %d", xPortGetCoreID());
+    while (1)
+    {
+        // Update CPU load even if no RMT event
+        monitor_update_cpu_load();
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+}
+
+void monitor_task_rmt(void *arg)
+{
+    ESP_LOGI(TAG, "monitor_task_rmt started, on core %d", xPortGetCoreID());
+    while (1)
+    {
+        monitor_process_rmt_rx();
+    }
+}
+
 /**
  * @brief Initialization task for the application.
  *
@@ -90,7 +112,9 @@ static void distance_task(void *pvParameters)
  */
 static void init_task(void *pvParameters)
 {
-    ESP_LOGI(TAG, "Init task started");
+    ESP_LOGI(TAG, "Init task started on core %d", xPortGetCoreID());
+    // ESP_LOGI(TAG, "Number of cores: %d", esp_cpu_get_core_count());
+
     if (wifi_setup() != ESP_OK)
     {
         ESP_LOGE(TAG, "Failed to connect to Wi-Fi");
@@ -110,6 +134,8 @@ static void init_task(void *pvParameters)
     monitor_init();
     xTaskCreate(led_task, "led_task", 2048, NULL, 5, NULL);
     xTaskCreate(distance_task, "distance_task", 8192, NULL, 5, NULL);
+    xTaskCreate(monitor_task_1s, "monitor_task_1s", 2048, NULL, 5, NULL);
+    xTaskCreate(monitor_task_rmt, "monitor_task_rmt", 4096, NULL, 5, NULL);
     vTaskDelete(NULL);
 }
 

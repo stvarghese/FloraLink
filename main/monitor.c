@@ -32,12 +32,93 @@
 #include "esp_log.h"
 #include "sdkconfig.h"
 
+#include "esp_system.h"
+#include "esp_timer.h"
+
 static const char *TAG = "monitor";
+// Variables for RMT RX
 static QueueHandle_t s_rmt_evt_q;
 static rmt_channel_handle_t g_rx_chan = NULL;
 static void *g_rx_buf = NULL;
 static size_t g_rx_buf_sz = 0;
 static rmt_receive_config_t g_rx_cfg;
+
+// --- CPU load estimator ---
+static uint64_t s_idle_count = 0;
+static uint64_t s_last_idle_count = 0;
+static uint64_t s_last_time = 0;
+static float s_cpu_load = 0.0f;
+static float s_max_idle = 0.0f;
+static bool s_idle_calibrated = false;
+#define MAX_IDLE_AVG_ALPHA 0.1f // Smoothing factor for moving average
+
+// Idle hook increments this counter
+void vApplicationIdleHook(void)
+{
+    s_idle_count++;
+}
+
+// Call this periodically (e.g., from monitor_task or a timer)
+void monitor_update_cpu_load(void)
+{
+    uint64_t now = esp_timer_get_time();
+    uint64_t idle = s_idle_count;
+    uint64_t dt = now - s_last_time;
+    uint64_t didle = idle - s_last_idle_count;
+    float idle_frac = 0.0f;
+
+    // Step 2: Use a moving average for max_idle
+    if (didle > 0)
+    {
+        if (!s_idle_calibrated)
+        {
+            s_max_idle = (float)didle;
+            s_idle_calibrated = true;
+            // ESP_LOGI(TAG, "Calibrated max_idle: %.2f", s_max_idle);
+        }
+        else
+        {
+            float prev = s_max_idle;
+            s_max_idle = (1.0f - MAX_IDLE_AVG_ALPHA) * s_max_idle + MAX_IDLE_AVG_ALPHA * (float)didle;
+            if ((int)prev != (int)s_max_idle)
+            {
+                // ESP_LOGI(TAG, "Updated max_idle (moving avg): %.2f", s_max_idle);
+            }
+        }
+    }
+
+    // Step 3: Use empirical max_idle for CPU load calculation
+    if (s_max_idle > 0)
+    {
+        idle_frac = (float)didle / s_max_idle;
+    }
+
+    s_cpu_load = 1.0f - idle_frac;
+    if (s_cpu_load < 0)
+        s_cpu_load = 0;
+    if (s_cpu_load > 1)
+        s_cpu_load = 1;
+    ESP_LOGI(TAG, "=====================");
+    // ESP_LOGI(TAG, "idle count: %llu", idle);
+    // ESP_LOGI(TAG, "d idle: %llu", didle);
+    // ESP_LOGI(TAG, "dt: %llu us", dt);
+    // ESP_LOGI(TAG, "max_idle: %.2f", s_max_idle);
+    // ESP_LOGI(TAG, "idle fraction: %.2f%%", idle_frac * 100);
+    ESP_LOGI(TAG, "CPU Load: %.2f%%", s_cpu_load * 100);
+    s_last_time = now;
+    s_last_idle_count = idle;
+}
+
+void monitor_get_device_stats(device_stats_t *stats)
+{
+    if (!stats)
+        return;
+    stats->free_heap = esp_get_free_heap_size();
+    stats->min_free_heap = esp_get_minimum_free_heap_size();
+    stats->uptime_ms = esp_timer_get_time() / 1000ULL;
+    monitor_update_cpu_load();
+    stats->cpu_load = s_cpu_load;
+}
 
 /**
  * @brief RMT RX done callback (ISR context).
@@ -76,30 +157,27 @@ static bool IRAM_ATTR rmt_rx_done_cb(rmt_channel_handle_t chan,
 }
 
 /**
- * @brief FreeRTOS task to process and log RMT RX events.
+ * @brief Function to process and log RMT RX events.
  *
  * Waits for events from the ISR via the queue, logs pulse timings, and re-arms the RMT.
  * This is the only place where logging and heavy processing should occur.
  * @param arg Unused
  */
-static void monitor_task(void *arg)
+void monitor_process_rmt_rx(void)
 {
     rmt_rx_done_event_data_t evt;
-    while (1)
+    if (xQueueReceive(s_rmt_evt_q, &evt, 1000 / portTICK_PERIOD_MS)) // 1s timeout
     {
-        if (xQueueReceive(s_rmt_evt_q, &evt, portMAX_DELAY))
+        const rmt_symbol_word_t *syms = evt.received_symbols;
+        for (size_t i = 0; i < evt.num_symbols; i++)
         {
-            const rmt_symbol_word_t *syms = evt.received_symbols;
-            for (size_t i = 0; i < evt.num_symbols; i++)
-            {
-                float t0_us = syms[i].duration0 / 10.0f;
-                float t1_us = syms[i].duration1 / 10.0f;
-                ESP_LOGI(TAG, "lvl0=%d t0=%.1fus | lvl1=%d t1=%.1fus",
-                         syms[i].level0, t0_us, syms[i].level1, t1_us);
-            }
-            // Re-arm RMT for next event
-            rmt_receive(g_rx_chan, g_rx_buf, g_rx_buf_sz, &g_rx_cfg);
+            float t0_us = syms[i].duration0 / 10.0f;
+            float t1_us = syms[i].duration1 / 10.0f;
+            ESP_LOGI(TAG, "lvl0=%d t0=%.1fus | lvl1=%d t1=%.1fus",
+                     syms[i].level0, t0_us, syms[i].level1, t1_us);
         }
+        // Re-arm RMT for next event
+        rmt_receive(g_rx_chan, g_rx_buf, g_rx_buf_sz, &g_rx_cfg);
     }
 }
 
@@ -142,7 +220,6 @@ void monitor_init(void)
     // 7. Enable and arm RMT
     rmt_enable(g_rx_chan);
     rmt_receive(g_rx_chan, g_rx_buf, g_rx_buf_sz, &g_rx_cfg);
-    // 8. Create event queue and processing task
+    // 8. Create event queue (task is created in tasks.c)
     s_rmt_evt_q = xQueueCreate(10, sizeof(rmt_rx_done_event_data_t));
-    xTaskCreatePinnedToCore(monitor_task, "monitor_task", 4096, NULL, 5, NULL, 0);
 }

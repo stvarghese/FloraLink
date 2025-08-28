@@ -5,11 +5,28 @@
 #include <string.h>
 #include <esp_log.h>
 #include <esp_http_server.h>
+#include "monitor.h"
+// HTTP GET handler for /stats
+static esp_err_t stats_get_handler(httpd_req_t *req)
+{
+    device_stats_t stats;
+    monitor_get_device_stats(&stats);
+    char resp[192];
+    snprintf(resp, sizeof(resp),
+             "{\"free_heap\":%u,\"min_free_heap\":%u,\"uptime_ms\":%llu,\"cpu_load\":%.2f}\n",
+             (unsigned int)stats.free_heap,
+             (unsigned int)stats.min_free_heap,
+             (unsigned long long)stats.uptime_ms,
+             stats.cpu_load);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
 
+static char html[4096];
 // HTTP GET handler for /
 static esp_err_t index_get_handler(httpd_req_t *req)
 {
-    char html[2048];
     const char *ssid = wifi_get_ssid();
     snprintf(html, sizeof(html),
              "<!DOCTYPE html>"
@@ -22,6 +39,10 @@ static esp_err_t index_get_handler(httpd_req_t *req)
              "#distance{font-size:2.5em;color:#2196f3;margin:16px 0;}"
              "#error{color:#f44336;margin-bottom:16px;}"
              "footer{margin-top:32px;font-size:0.95em;color:#888;}"
+             "#statsBtn{margin-top:20px;padding:8px 16px;font-size:1em;border:none;border-radius:6px;background:#2196f3;color:#fff;cursor:pointer;}"
+             "#statsPanel{display:none;margin-top:16px;padding:12px;background:#f0f4fa;border-radius:8px;font-size:1em;}"
+             "#statsPanel table{width:100%%;border-collapse:collapse;}"
+             "#statsPanel td{padding:4px 8px;}"
              "</style>"
              "</head><body>"
              "<div class='container'>"
@@ -29,6 +50,15 @@ static esp_err_t index_get_handler(httpd_req_t *req)
              "<div>Current Distance:</div>"
              "<div id='distance'>--</div>"
              "<div id='error'></div>"
+             "<button id='statsBtn' onclick='toggleStats()'>Show Device Stats</button>"
+             "<div id='statsPanel'>"
+             "<table>"
+             "<tr><td>Free Heap:</td><td id='statHeap'>-</td></tr>"
+             "<tr><td>Min Heap:</td><td id='statMinHeap'>-</td></tr>"
+             "<tr><td>Uptime:</td><td id='statUptime'>-</td></tr>"
+             "<tr><td>CPU Load:</td><td id='statCpuLoad'>-</td></tr>"
+             "</table>"
+             "</div>"
              "<footer id='footer'></footer>"
              "</div>"
              "<script>"
@@ -45,6 +75,30 @@ static esp_err_t index_get_handler(httpd_req_t *req)
              "  const date = now.toLocaleDateString();"
              "  const time = now.toLocaleTimeString();"
              "  document.getElementById('footer').textContent = 'On WLAN: ' + ssid + ', ' + date + ', ' + time;"
+             "}"
+             "let statsVisible = false;"
+             "let statsInterval = null;"
+             "function toggleStats(){"
+             "  statsVisible = !statsVisible;"
+             "  document.getElementById('statsPanel').style.display = statsVisible ? 'block' : 'none';"
+             "  document.getElementById('statsBtn').textContent = statsVisible ? 'Hide Device Stats' : 'Show Device Stats';"
+             "  if(statsVisible){"
+             "    fetchStats();"
+             "    statsInterval = setInterval(fetchStats, 1000);"
+             "  } else {"
+             "    if(statsInterval) clearInterval(statsInterval);"
+             "    statsInterval = null;"
+             "  }"
+             "}"
+             "function fetchStats(){"
+             "  fetch('/stats').then(r=>r.json()).then(j=>{"
+             "    document.getElementById('statHeap').textContent = j.free_heap + ' B';"
+             "    document.getElementById('statMinHeap').textContent = j.min_free_heap + ' B';"
+             "    let ms = j.uptime_ms;"
+             "    let sec = Math.floor(ms/1000)%%60, min = Math.floor(ms/60000)%%60, hr = Math.floor(ms/3600000);"
+             "    document.getElementById('statUptime').textContent = hr+'h '+min+'m '+sec+'s';"
+             "    document.getElementById('statCpuLoad').textContent = Math.round(j.cpu_load*100)+'%%';"
+             "  });"
              "}"
              "fetchDistance();setInterval(fetchDistance,1000);"
              "updateFooter();setInterval(updateFooter,1000);"
@@ -109,6 +163,15 @@ esp_err_t webserver_init(void)
     }
     httpd_register_uri_handler(server, &index_uri);
     httpd_register_uri_handler(server, &distance_uri);
+
+    // Register /stats endpoint
+    httpd_uri_t stats_uri = {
+        .uri = "/stats",
+        .method = HTTP_GET,
+        .handler = stats_get_handler,
+        .user_ctx = NULL};
+    httpd_register_uri_handler(server, &stats_uri);
+
     ESP_LOGI(TAG, "Web server started on port %d", config.server_port);
     return ESP_OK;
 }

@@ -20,7 +20,10 @@
 			"cstdint": "c",
 			"esp_system.h": "c",
 			"esp_timer.h": "c",
-			"monitor.h": "c"
+			"monitor.h": "c",
+			"cmath": "c",
+			"complex": "c",
+			"blink_config.h": "c"
 		}
 	}
 }

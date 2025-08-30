@@ -49,7 +49,7 @@ static void led_task(void *pvParameters)
     while (1)
     {
         blink_toggle();
-        vTaskDelay(CONFIG_BLINK_PERIOD / portTICK_PERIOD_MS);
+        vTaskDelay(blink_get_period_ms() / portTICK_PERIOD_MS);
     }
 }
 

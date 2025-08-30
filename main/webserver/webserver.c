@@ -1,3 +1,5 @@
+#include "modemanager.h"
+#include "blink_config.h"
 
 #include "webserver.h"
 #include "wifi_setup.h"
@@ -35,6 +37,80 @@ static esp_err_t stats_get_handler(httpd_req_t *req)
         }                                                                          \
     } while (0)
 
+/* HTTP GET handler for /configure */
+static esp_err_t configure_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    SEND_HTML_CHUNK("<!DOCTYPE html><html><head><title>Configure</title><meta name='viewport' content='width=device-width,initial-scale=1'>");
+    SEND_HTML_CHUNK("<style>"
+                    "body{font-family:sans-serif;background:#f4f8fb;}"
+                    ".container{max-width:400px;min-height:480px;margin:40px auto 0 auto;background:#fff;border-radius:12px;box-shadow:0 2px 8px #0001;padding:0 0 24px 0;}"
+                    ".nav{display:flex;gap:0;padding:0 24px 0 24px;border-radius:12px 12px 0 0;background:#fff;box-shadow:0 2px 8px #0001;overflow:hidden;position:relative;}"
+                    ".nav a{flex:1;text-align:center;padding:6px 0;font-weight:500;text-decoration:none;color:#2196f3;background:#e3eaf3;border:none;transition:background 0.2s,color 0.2s;font-size:0.98em;position:relative;z-index:1;}"
+                    ".nav a.active{background:#fff;color:#1565c0;cursor:default;}"
+                    ".nav a:not(.active):hover{background:#d0e2fa;}"
+                    ".nav .tab-underline{position:absolute;bottom:0;left:0;height:2px;width:50%;background:#2196f3;transition:left 0.3s cubic-bezier(.4,0,.2,1),width 0.3s cubic-bezier(.4,0,.2,1);z-index:2;}"
+                    "h2{margin:16px 24px 0 24px;color:#2196f3;}"
+                    "form{margin:24px 24px 0 24px;}"
+                    "label{display:block;margin:18px 0 6px;}"
+                    "input[type=number]{width:100%%;padding:8px;font-size:1em;}"
+                    "button{margin-top:18px;padding:8px 16px;font-size:1em;border:none;border-radius:6px;background:#2196f3;color:#fff;cursor:pointer;}"
+                    "</style>");
+    SEND_HTML_CHUNK("<script>function moveTabUnderline(){var nav=document.querySelector('.nav');if(!nav)return;var active=nav.querySelector('.active');var underline=nav.querySelector('.tab-underline');if(active&&underline){underline.style.left=active.offsetLeft+'px';underline.style.width=active.offsetWidth+'px';}}window.addEventListener('DOMContentLoaded',moveTabUnderline);window.addEventListener('resize',moveTabUnderline);</script>");
+    SEND_HTML_CHUNK("</head><body><div class='container'>");
+    SEND_HTML_CHUNK("<nav class='nav'><a href='/' >Home</a><a href='/configure' class='active'>Configure</a><div class='tab-underline'></div></nav>");
+    SEND_HTML_CHUNK("<h2>Configure LED Blink</h2>");
+    SEND_HTML_CHUNK("<form method='POST' action='/configure'>");
+    SEND_HTML_CHUNK("<label for='period'>Blink Period (ms):</label>");
+    char input[128];
+    snprintf(input, sizeof(input), "<input type='number' id='period' name='period' min='%d' max='%d' value='%lu' required>", BLINK_PERIOD_MIN, BLINK_PERIOD_MAX, blink_get_period_ms());
+    SEND_HTML_CHUNK(input);
+    SEND_HTML_CHUNK("<button type='submit'>Update</button>");
+    SEND_HTML_CHUNK("</form>");
+    // Sleep/Deep Sleep buttons
+    SEND_HTML_CHUNK("<form method='POST' action='/configure' style='margin-top:32px;display:flex;gap:16px;justify-content:center;'>");
+    SEND_HTML_CHUNK("<button name='sleep' value='light' type='submit' style='background:#ffb300;color:#fff;'>Sleep</button>");
+    SEND_HTML_CHUNK("<button name='sleep' value='deep' type='submit' style='background:#d32f2f;color:#fff;'>Deep Sleep</button>");
+    SEND_HTML_CHUNK("</form>");
+    SEND_HTML_CHUNK("</div></body></html>");
+    httpd_resp_sendstr_chunk(req, NULL); // End chunked response
+    return ESP_OK;
+}
+
+/* HTTP POST handler for /configure */
+static esp_err_t configure_post_handler(httpd_req_t *req)
+{
+    char buf[64];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0)
+    {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+    // Parse: look for sleep/deep sleep or period
+    if (strstr(buf, "sleep=light"))
+    {
+        modemanager_light_sleep();
+    }
+    else if (strstr(buf, "sleep=deep"))
+    {
+        modemanager_deep_sleep();
+    }
+    else
+    {
+        char *p = strstr(buf, "period=");
+        uint32_t period = 0;
+        if (p)
+        {
+            period = (uint32_t)atoi(p + 7);
+            blink_set_period_ms(period);
+        }
+    }
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_sendstr(req, "<html><body><script>window.location='/configure';</script></body></html>");
+    return ESP_OK;
+}
 // HTTP GET handler for /
 static esp_err_t index_get_handler(httpd_req_t *req)
 {
@@ -47,17 +123,26 @@ static esp_err_t index_get_handler(httpd_req_t *req)
     SEND_HTML_CHUNK(
         "<style>"
         "body{font-family:sans-serif;background:#f4f8fb;margin:0;padding:0;}"
-        ".container{max-width:400px;margin:40px auto 0 auto;background:#fff;border-radius:12px;box-shadow:0 2px 8px #0001;padding:32px 24px 24px 24px;}"
-        "h1{margin-top:0;font-size:2em;color:#2196f3;}"
-        "#distance{font-size:2.5em;color:#2196f3;margin:16px 0;}"
-        "#error{color:#f44336;margin-bottom:16px;}"
-        "footer{margin-top:32px;font-size:0.95em;color:#888;}"
-        "#statsBtn{margin-top:20px;padding:8px 16px;font-size:1em;border:none;border-radius:6px;background:#2196f3;color:#fff;cursor:pointer;}"
-        "#statsPanel{display:none;margin-top:16px;padding:12px;background:#f0f4fa;border-radius:8px;font-size:1em;}"
-        "#statsPanel table{width:100%;border-collapse:collapse;}"
+        ".container{max-width:400px;min-height:480px;margin:40px auto 0 auto;background:#fff;border-radius:12px;box-shadow:0 2px 8px #0001;padding:0 0 24px 0;}"
+        ".nav{display:flex;gap:0;padding:0 24px 0 24px;border-radius:12px 12px 0 0;background:#fff;box-shadow:0 2px 8px #0001;overflow:hidden;position:relative;}"
+        ".nav a{flex:1;text-align:center;padding:6px 0;font-weight:500;text-decoration:none;color:#2196f3;background:#e3eaf3;border:none;transition:background 0.2s,color 0.2s;font-size:0.98em;position:relative;z-index:1;}"
+        ".nav a.active{background:#fff;color:#1565c0;cursor:default;}"
+        ".nav a:not(.active):hover{background:#d0e2fa;}"
+        ".nav .tab-underline{position:absolute;bottom:0;left:0;height:2px;width:50%%;background:#2196f3;transition:left 0.3s cubic-bezier(.4,0,.2,1),width 0.3s cubic-bezier(.4,0,.2,1);z-index:2;}"
+        "h1{margin:24px 24px 0 24px;font-size:2em;color:#2196f3;}"
+        ".distance-label{margin:16px 0 0 24px;font-size:1.1em;}"
+        "#distance{font-size:2.5em;color:#2196f3;margin:8px 0 0 24px;}"
+        "#error{color:#f44336;margin:0 0 16px 24px;}"
+        "footer{margin:32px 0 0 24px;font-size:0.95em;color:#888;}"
+        "#statsBtn{margin:20px 0 0 24px;padding:8px 16px;font-size:1em;border:none;border-radius:6px;background:#2196f3;color:#fff;cursor:pointer;}"
+        "#statsPanel{display:none;margin:16px 24px 0 24px;padding:12px;background:#f0f4fa;border-radius:8px;font-size:1em;}"
+        "#statsPanel table{width:100%%;border-collapse:collapse;}"
         "#statsPanel td{padding:4px 8px;}"
-        "</style></head><body><div class='container'>"
-        "<h1>FloraLink.Hub</h1><div>Current Distance:</div>"
+        "</style>"
+        "<script>function moveTabUnderline(){var nav=document.querySelector('.nav');if(!nav)return;var active=nav.querySelector('.active');var underline=nav.querySelector('.tab-underline');if(active&&underline){underline.style.left=active.offsetLeft+'px';underline.style.width=active.offsetWidth+'px';}}window.addEventListener('DOMContentLoaded',moveTabUnderline);window.addEventListener('resize',moveTabUnderline);</script>"
+        "</head><body><div class='container'>"
+        "<nav class='nav'><a href='/' class='active'>Home</a><a href='/configure'>Configure</a><div class='tab-underline'></div></nav>"
+        "<h1>FloraLink.Hub</h1><div class='distance-label'>Current Distance:</div>"
         "<div id='distance'>--</div><div id='error'></div>"
         "<button id='statsBtn' onclick='toggleStats()'>Show Device Stats</button>"
         "<div id='statsPanel'><table>"
@@ -83,8 +168,10 @@ static esp_err_t index_get_handler(httpd_req_t *req)
     {
         ESP_LOGW("WebServer", "SSID JS snippet truncated");
     }
+    /* Dynamic SSID JS snippet */
     SEND_HTML_CHUNK(dyn);
 
+    /* Dynamic SSID JS snippet */
     SEND_HTML_CHUNK(
         "function fetchDistance(){fetch('/distance').then(r=>r.json()).then(j=>{"
         "document.getElementById('distance').textContent=j.distance+' cm';"
@@ -143,6 +230,7 @@ void webserver_publish_error(int32_t error_code)
     latest_error = error_code;
 }
 
+/* Web server initialization */
 esp_err_t webserver_init(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -167,9 +255,9 @@ esp_err_t webserver_init(void)
         ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(ret));
         return ret;
     }
+    /* Register URI handlers */
     httpd_register_uri_handler(server, &index_uri);
     httpd_register_uri_handler(server, &distance_uri);
-
     // Register /stats endpoint
     httpd_uri_t stats_uri = {
         .uri = "/stats",
@@ -177,7 +265,19 @@ esp_err_t webserver_init(void)
         .handler = stats_get_handler,
         .user_ctx = NULL};
     httpd_register_uri_handler(server, &stats_uri);
-
+    // Register /configure GET and POST
+    httpd_uri_t configure_get_uri = {
+        .uri = "/configure",
+        .method = HTTP_GET,
+        .handler = configure_get_handler,
+        .user_ctx = NULL};
+    httpd_register_uri_handler(server, &configure_get_uri);
+    httpd_uri_t configure_post_uri = {
+        .uri = "/configure",
+        .method = HTTP_POST,
+        .handler = configure_post_handler,
+        .user_ctx = NULL};
+    httpd_register_uri_handler(server, &configure_post_uri);
     ESP_LOGI(TAG, "Web server started on port %d", config.server_port);
     return ESP_OK;
 }

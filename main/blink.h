@@ -19,4 +19,5 @@ void blink_init(void);
  */
 void blink_toggle(void);
 
+#include "blink_config.h"
 #endif // BLINK_H

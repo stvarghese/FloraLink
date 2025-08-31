@@ -23,7 +23,22 @@
 			"monitor.h": "c",
 			"cmath": "c",
 			"complex": "c",
-			"blink_config.h": "c"
+			"blink_config.h": "c",
+			"esp_websocket_client.h": "c",
+			"array": "c",
+			"chrono": "c",
+			"string_view": "c",
+			"functional": "c",
+			"ratio": "c",
+			"tuple": "c",
+			"type_traits": "c",
+			"utility": "c",
+			"charconv": "c",
+			"compare": "c",
+			"variant": "c",
+			"websockserver.h": "c",
+			"nodeioprotocol.h": "c",
+			"cjson.h": "c"
 		}
 	}
 }

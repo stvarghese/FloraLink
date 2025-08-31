@@ -278,6 +278,10 @@ esp_err_t webserver_init(void)
         .handler = configure_post_handler,
         .user_ctx = NULL};
     httpd_register_uri_handler(server, &configure_post_uri);
+
+    // websocket server init
+    websockserver_init(&server);
+
     ESP_LOGI(TAG, "Web server started on port %d", config.server_port);
     return ESP_OK;
 }

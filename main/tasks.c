@@ -31,8 +31,9 @@
 #include "esp_system.h"
 #include "esp_cpu.h"
 
-#include "webserver/webserver.h"
+#include "webserver.h"
 #include "wifi_setup.h"
+#include "nodeio.h"
 
 static const char *TAG = "FloraLink";
 
@@ -90,6 +91,7 @@ void monitor_task_1s(void *arg)
     {
         // Update CPU load even if no RMT event
         monitor_update_cpu_load();
+        nodeio_monitor_nodeslist();
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }
@@ -128,6 +130,11 @@ static void init_task(void *pvParameters)
     if (webserver_init() != ESP_OK)
     {
         ESP_LOGE(TAG, "Failed to start webserver");
+        vTaskDelete(NULL);
+    }
+    if (nodeio_init() != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to initialize nodeio");
         vTaskDelete(NULL);
     }
     blink_init();

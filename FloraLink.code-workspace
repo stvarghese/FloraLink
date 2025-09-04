@@ -38,7 +38,12 @@
 			"variant": "c",
 			"websockserver.h": "c",
 			"nodeioprotocol.h": "c",
-			"cjson.h": "c"
-		}
+			"cjson.h": "c",
+			"esp_http_server.h": "c",
+			"iterator": "c",
+			"stdbool.h": "c",
+			"sdkconfig.h": "c"
+		},
+		"powershell.cwd": "FloraLink"
 	}
 }

@@ -98,13 +98,13 @@ void monitor_update_cpu_load(void)
         s_cpu_load = 0;
     if (s_cpu_load > 1)
         s_cpu_load = 1;
-    ESP_LOGI(TAG, "=====================");
+    // ESP_LOGI(TAG, "=====================");
     // ESP_LOGI(TAG, "idle count: %llu", idle);
     // ESP_LOGI(TAG, "d idle: %llu", didle);
     // ESP_LOGI(TAG, "dt: %llu us", dt);
     // ESP_LOGI(TAG, "max_idle: %.2f", s_max_idle);
     // ESP_LOGI(TAG, "idle fraction: %.2f%%", idle_frac * 100);
-    ESP_LOGI(TAG, "CPU Load: %.2f%%", s_cpu_load * 100);
+    // ESP_LOGI(TAG, "CPU Load: %.2f%%", s_cpu_load * 100);
     s_last_time = now;
     s_last_idle_count = idle;
 }

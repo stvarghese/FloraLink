@@ -2,6 +2,7 @@
 #include "blink_config.h"
 
 #include "webserver.h"
+#include "websockserver.h"
 #include "wifi_setup.h"
 #include <stdio.h>
 #include <string.h>
@@ -233,8 +234,9 @@ void webserver_publish_error(int32_t error_code)
 /* Web server initialization */
 esp_err_t webserver_init(void)
 {
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = 80;
+    // Define HTTP server configuration
+    httpd_config_t config_http = HTTPD_DEFAULT_CONFIG();
+    config_http.server_port = 80;
 
     // Register root HTML page
     httpd_uri_t index_uri = {
@@ -249,10 +251,10 @@ esp_err_t webserver_init(void)
         .handler = distance_get_handler,
         .user_ctx = NULL};
 
-    esp_err_t ret = httpd_start(&server, &config);
+    esp_err_t ret = httpd_start(&server, &config_http);
     if (ret != ESP_OK)
     {
-        ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to start HTTP server: %s, code: 0x%X", esp_err_to_name(ret), ret);
         return ret;
     }
     /* Register URI handlers */
@@ -279,9 +281,12 @@ esp_err_t webserver_init(void)
         .user_ctx = NULL};
     httpd_register_uri_handler(server, &configure_post_uri);
 
-    // websocket server init
-    websockserver_init(&server);
-
-    ESP_LOGI(TAG, "Web server started on port %d", config.server_port);
-    return ESP_OK;
+    // websocket server init and check for errors
+    bool ws_ret = websockserver_init(server);
+    if (!ws_ret)
+    {
+        ESP_LOGE(TAG, "Failed to start WebSocket server");
+    }
+    ESP_LOGI(TAG, "Web server started on port %d", config_http.server_port);
+    return ret;
 }

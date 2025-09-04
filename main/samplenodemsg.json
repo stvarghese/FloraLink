@@ -1,0 +1,44 @@
+{
+    "magic": 3203391147,
+    "type": "node_data",
+    "node_id": "2",
+    "seq_num": 42,
+    "timestamp": 1693550000,
+    "status": "online",
+    "sensors": [
+        "temperature",
+        "humidity",
+        "moisture"
+    ],
+    "services": [
+        "diagnostic",
+        "ota"
+    ],
+    "payload": [
+        {
+            "type": "sensor",
+            "sensor": {
+                "temperature": 25.5,
+                "humidity": 60,
+                "moisture": 300
+            }
+        },
+        {
+            "type": "diagnostics",
+            "diagnostics": {
+                "uptime_sec": 123456,
+                "free_heap": 20480,
+                "rssi": -65,
+                "error_code": 0,
+                "info": "No issues detected"
+            }
+        },
+        {
+            "type": "ota_status",
+            "ota_status": {
+                "status_code": 1,
+                "message": "OTA update successful"
+            }
+        }
+    ]
+}

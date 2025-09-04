@@ -9,9 +9,9 @@ static websockserver_close_cb_t close_callback = NULL;
 static wss_session_t wss_activesessions[MAX_SESSIONS];
 
 // Add or update a WebSocket session by session_id (array index)
-wss_session_t *websockserver_session_update(int client_fd, int session_id)
+wss_session_t *websockserver_session_update(int client_fd, uint8_t session_id)
 {
-    if (session_id < 0 || session_id >= MAX_SESSIONS)
+    if (session_id >= MAX_SESSIONS)
         return NULL;
     wss_activesessions[session_id].client_fd = client_fd;
     wss_activesessions[session_id].connected = true;
@@ -34,12 +34,25 @@ wss_session_t *websockserver_session_remove(int client_fd)
 }
 
 // Find client_fd by session_id (array index)
-int websockserver_session_find_fd(int session_id)
+int websockserver_session_find_fd(uint8_t session_id)
 {
-    if (session_id < 0 || session_id >= MAX_SESSIONS)
+    if (session_id >= MAX_SESSIONS)
         return -1;
     if (wss_activesessions[session_id].connected)
         return wss_activesessions[session_id].client_fd;
+    return -1;
+}
+
+// Find session_id by client_fd
+uint8_t websockserver_session_find_sessid(int client_fd)
+{
+    for (int i = 0; i < MAX_SESSIONS; ++i)
+    {
+        if (wss_activesessions[i].connected && wss_activesessions[i].client_fd == client_fd)
+        {
+            return i;
+        }
+    }
     return -1;
 }
 
@@ -100,7 +113,12 @@ bool websockserver_init(httpd_handle_t server_handle)
         .handler = ws_handler,
         .user_ctx = NULL,
         .is_websocket = true};
-    return httpd_register_uri_handler(server_handle, &ws_uri) == ESP_OK;
+    if (httpd_register_uri_handler(server_handle, &ws_uri) == ESP_OK)
+    {
+        ws_server_handle = server_handle;
+        return true;
+    }
+    return false;
 }
 
 bool websockserver_send(int client_fd, const char *data, size_t len)
@@ -110,11 +128,10 @@ bool websockserver_send(int client_fd, const char *data, size_t len)
         .payload = (uint8_t *)data,
         .len = len,
         .final = true};
-    // Find the server handle (assume only one server for now)
-    extern httpd_handle_t global_server_handle;
-    if (!global_server_handle)
+    // Use the server handle
+    if (!ws_server_handle)
         return false;
-    return httpd_ws_send_frame_async(global_server_handle, client_fd, &ws_pkt) == ESP_OK;
+    return httpd_ws_send_frame_async(ws_server_handle, client_fd, &ws_pkt) == ESP_OK;
 }
 
 void websockserver_set_receive_callback(void (*callback)(int client_fd, const char *data, size_t len))

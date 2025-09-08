@@ -641,7 +641,8 @@ static void nodeio_on_close(int client_fd)
     node_id = websockserver_session_find_sessid(client_fd);
     if (node_id == -1)
     {
-        ESP_LOGW(TAG, "Invalid node id in server close callback")
+        ESP_LOGW(TAG, "Invalid node id in server close callback");
+        return;
     }
 
     // Handle client disconnection

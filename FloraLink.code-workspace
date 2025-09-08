@@ -43,7 +43,8 @@
 			"iterator": "c",
 			"stdbool.h": "c",
 			"sdkconfig.h": "c",
-			"task.h": "c"
+			"task.h": "c",
+			"format": "c"
 		},
 		"powershell.cwd": "FloraLink"
 	}

@@ -45,6 +45,9 @@ void websockserver_pong_timeout(int client_fd);
 // Reset pong timeout for a connected client
 void websockserver_reset_pong_timer(int client_fd);
 
+// Pong timeout callback for esp_timer
+void websockserver_pong_timeout_callback(void *arg);
+
 // Set callback for received data from any client
 void websockserver_set_receive_callback(void (*callback)(int client_fd, const char *data, size_t len));
 
@@ -53,9 +56,9 @@ typedef void (*websockserver_close_cb_t)(int client_fd);
 void websockserver_set_close_callback(websockserver_close_cb_t cb);
 
 // Session management functions
-wss_session_t *websockserver_session_update(int client_fd, uint8_t session_id);
+wss_session_t *websockserver_session_update(int client_fd, int session_id);
 wss_session_t *websockserver_session_remove(int client_fd);
-int websockserver_session_find_fd(uint8_t session_id);
+int websockserver_session_find_fd(int session_id);
 int websockserver_session_find_sessid(int client_fd);
 
 #endif // WEBSOCKSERVER_H

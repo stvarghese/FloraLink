@@ -27,6 +27,7 @@ wss_session_t *websockserver_session_remove(int client_fd)
         {
             wss_activesessions[i].connected = false;
             wss_activesessions[i].client_fd = -1;
+
             return &wss_activesessions[i];
         }
     }
@@ -44,7 +45,7 @@ int websockserver_session_find_fd(uint8_t session_id)
 }
 
 // Find session_id by client_fd
-uint8_t websockserver_session_find_sessid(int client_fd)
+int websockserver_session_find_sessid(int client_fd)
 {
     for (int i = 0; i < MAX_SESSIONS; ++i)
     {
@@ -88,6 +89,17 @@ static esp_err_t ws_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    // Check for pong frame
+    if (ws_pkt.type == HTTPD_WS_TYPE_PONG)
+    {
+        // Indicate pong reception
+        ESP_LOGI(TAG, "Pong received from client_fd=%d", httpd_req_to_sockfd(req));
+        // Reset pong timer
+        websockserver_reset_pong_timeout(httpd_req_to_sockfd(req));
+
+        return ESP_OK;
+    }
+
     if (ws_pkt.len)
     {
         ws_pkt.payload = malloc(ws_pkt.len + 1);
@@ -112,10 +124,17 @@ bool websockserver_init(httpd_handle_t server_handle)
         .method = HTTP_GET,
         .handler = ws_handler,
         .user_ctx = NULL,
+        .handle_ws_control_frames = true,
         .is_websocket = true};
     if (httpd_register_uri_handler(server_handle, &ws_uri) == ESP_OK)
     {
         ws_server_handle = server_handle;
+
+        // Reset active pings
+        for (int i = 0; i < MAX_SESSIONS; ++i)
+        {
+            ws_active_pings[i] = false;
+        }
         return true;
     }
     return false;
@@ -132,6 +151,86 @@ bool websockserver_send(int client_fd, const char *data, size_t len)
     if (!ws_server_handle)
         return false;
     return httpd_ws_send_frame_async(ws_server_handle, client_fd, &ws_pkt) == ESP_OK;
+}
+
+bool websockserver_ping(int client_fd)
+{
+    // Find session Id and check if valid
+    uint8_t session_id = websockserver_session_find_sessid(client_fd);
+    if (session_id == -1)
+    {
+        ESP_LOGW(TAG, "Ping: session not found for client_fd=%d", client_fd);
+        return false;
+    }
+    httpd_ws_frame_t ws_pkt = {
+        .type = HTTPD_WS_TYPE_PING,
+        .payload = NULL,
+        .len = 0,
+        .final = true};
+    // Use the server handle
+    if (!ws_server_handle)
+        return false;
+
+    // Create and start pong timer
+    if (ws_pong_timers[session_id] == NULL)
+    {
+        // First execution, create timer
+        esp_timer_create_args_t timer_args = {
+            .callback = &websockserver_pong_timeout_callback,
+            .arg = (void *)client_fd,
+            .name = "ws_pong"};
+        esp_timer_create(&timer_args, &ws_pong_timers[session_id]);
+    }
+    else
+    {
+        // Just update the arg in case client_fd changed
+        ws_pong_timers[session_id]->arg = (void *)client_fd;
+    }
+
+    esp_timer_start_once(ws_pong_timers[session_id], WSS_PONG_TIMEOUT * 1000000);
+    ws_active_pings[session_id] = true;
+
+    return httpd_ws_send_frame_async(ws_server_handle, client_fd, &ws_pkt) == ESP_OK;
+}
+
+void websockserver_reset_pong_timer(int client_fd)
+{
+    // Find session Id and check if valid
+    uint8_t session_id = websockserver_session_find_sessid(client_fd);
+    if (session_id == -1)
+    {
+        ESP_LOGW(TAG, "Reset pong timeout: session not found for client_fd=%d", client_fd);
+        return;
+    }
+    ESP_LOGD(TAG, "Resetting pong timeout upon pong rx for client_fd=%d", client_fd);
+    esp_timer_stop(ws_pong_timers[session_id]);
+    ws_active_pings[session_id] = false;
+}
+
+void websockserver_pong_timeout_callback(void *arg)
+{
+    int client_fd = (int)arg;
+    websockserver_session_remove(client_fd);
+    uint8_t session_id = websockserver_session_find_sessid(client_fd);
+    if (session_id != -1)
+    {
+        ws_active_pings[session_id] = false;
+        // Also close the underlying socket/session
+        if (ws_server_handle)
+        {
+            httpd_sess_trigger_close(ws_server_handle, client_fd);
+        }
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Pong timeout: session not found for client_fd=%d", client_fd);
+        return;
+    }
+    ESP_LOGW(TAG, "Pong timeout for client_fd=%d, closing connection", client_fd);
+    if (close_callback)
+    {
+        close_callback(client_fd);
+    }
 }
 
 void websockserver_set_receive_callback(void (*callback)(int client_fd, const char *data, size_t len))

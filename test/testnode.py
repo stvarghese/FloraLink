@@ -1,6 +1,7 @@
 
 
 import asyncio
+from asyncio import log
 import websockets
 import json
 import sys
@@ -11,6 +12,7 @@ from contextlib import contextmanager
 
 # Protocol constants (should match nodeioprotocol.h)
 PROTOCOL_MAGIC = 0xBEEFBEEF
+MAX_NODES = 8
 MSG_TYP_CONNECT = "connect"
 MSG_TYP_NODE_DATA = "node_data"
 MSG_PAYLOAD_TYPE_SENSOR = "sensor"
@@ -56,20 +58,46 @@ def build_payloads(sensors):
             "message": "OTA update successful"
         }
     }
+
     return [sensor_payload, diagnostics_payload, ota_status_payload]
 
 async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_enabled, disconnect_event=None):
+    """
+    Simulates a single node over a websocket connection.
+
+    Lifecycle:
+      1. Connect to server.
+      2. Send CONNECT request and wait for acceptance.
+      3. Loop: send NODE_DATA messages at given interval (pause/resume controlled by control_event).
+      4. Handle ping/pong and unexpected messages.
+      5. Handle graceful disconnect on:
+           - disconnect_event triggered
+           - task cancellation
+           - exceptions
+      6. Always ensure websocket is closed in the end.
+    """
+
     def log(msg):
         if log_enabled.is_set():
             print(msg)
-    websocket = await websockets.connect(uri)
+
+    websocket = None
     seq_num = 1
+
     try:
-        log(f"[Node {node_id}] Connected to {uri}")
-        # Send connect request (no payload)
+        # === Connect phase ===
+        try:
+            websocket = await websockets.connect(uri)
+            log(f"[Node {node_id}] Connected to {uri}")
+        except Exception as e:
+            log(f"[Node {node_id}] Failed to connect: {e}")
+            return
+
+        # Send connect request
         connect_req = build_base_message(MSG_TYP_CONNECT, node_id, 0)
         await websocket.send(json.dumps(connect_req))
-        print(f"[Node {node_id}] Sent connect request")
+        log(f"[Node {node_id}] Sent connect request")
+
         # Wait for acceptance
         try:
             response = await asyncio.wait_for(websocket.recv(), timeout=5)
@@ -81,53 +109,67 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
         except asyncio.TimeoutError:
             log(f"[Node {node_id}] No response to connect request (timeout). Exiting.")
             return
-        # Send sensor values at interval, but allow pausing/resuming
+
+        # === Active phase ===
         while True:
             try:
+                # Graceful disconnect requested externally
                 if disconnect_event and disconnect_event.is_set():
                     disconnect_msg = build_base_message(MSG_TYP_DISCONNECT_REQUEST, node_id, seq_num)
-                    print(f"[Node {node_id}] Sending disconnect request")
+                    log(f"[Node {node_id}] Sending disconnect request")
                     await websocket.send(json.dumps(disconnect_msg))
-                    print(f"[Node {node_id}] Sent disconnect request")
-                    await websocket.close()
-                    await websocket.wait_closed()
-                    await asyncio.sleep(0.1)
-                    return
-                await control_event.wait()  # Wait until allowed to send
+                    log(f"[Node {node_id}] Sent disconnect request")
+                    return  # exit loop → final cleanup happens in finally
+
+                # Wait until allowed to send (pause/resume)
+                await control_event.wait()
+
+                # Build sensor data message
                 sensors = sample_msg.get("sensors", sample_msg)
                 msg = build_base_message(MSG_TYP_NODE_DATA, node_id, seq_num)
                 msg["sensors"] = sensors
                 msg["payload"] = build_payloads(sensors)
+
                 await websocket.send(json.dumps(msg))
-                log(f"[Node {node_id}] Sent data")
+                log(f"[Node {node_id}] Sent live data")
+
+                # Try to read a response (not expected, so timeout quickly)
                 try:
                     response = await asyncio.wait_for(websocket.recv(), timeout=0.1)
                     log(f"[Node {node_id}] Received (unexpected): {response}")
                 except asyncio.TimeoutError:
-                    pass  # No response expected
+                    pass
+
                 seq_num += 1
-                await asyncio.sleep(interval)
+
+                # Wait for next send cycle or disconnect trigger
+                try:
+                    await asyncio.wait_for(asyncio.shield(disconnect_event.wait()), timeout=interval)
+                except asyncio.TimeoutError:
+                    pass  # normal interval tick
+
             except asyncio.CancelledError:
-                # On cancellation, send disconnect if not already sent
-                if disconnect_event and not disconnect_event.is_set():
-                    disconnect_msg = build_base_message(MSG_TYP_DISCONNECT_REQUEST, node_id, seq_num)
-                    print(f"[Node {node_id}] Sending disconnect request (cancel)")
+                # Handle task cancellation gracefully
+                disconnect_msg = build_base_message(MSG_TYP_DISCONNECT_REQUEST, node_id, seq_num)
+                try:
                     await websocket.send(json.dumps(disconnect_msg))
-                    print(f"[Node {node_id}] Sent disconnect request (cancel)")
+                    log(f"[Node {node_id}] Sent disconnect request (cancel)")
+                except Exception:
+                    pass
+                raise  # re-raise so outer task manager knows
+
+    except Exception as e:
+        log(f"[Node {node_id}] Exception: {e}")
+
+    finally:
+        # === Final cleanup ===
+        if websocket is not None:
+            try:
                 await websocket.close()
                 await websocket.wait_closed()
-                await asyncio.sleep(0.1)
-                raise
-    except Exception as e:
-        if log_enabled.is_set():
-            print(f"[Node {node_id}] Exception: {e}")
-    finally:
-        try:
-            await websocket.close()
-            await websocket.wait_closed()
-        except Exception:
-            pass
-
+                log(f"[Node {node_id}] Connection closed cleanly.")
+            except Exception as e:
+                log(f"[Node {node_id}] Error during final close: {e}")
 
 class NodeManager:
     def __init__(self, uri, interval, sample_msg, log_enabled):
@@ -138,48 +180,67 @@ class NodeManager:
         self.lock = asyncio.Lock()
         self.log_enabled = log_enabled
 
-    async def add_node(self, node_id):
+    async def add_node(self, *node_ids):
         async with self.lock:
-            if node_id in self.node_tasks:
-                print(f"Node {node_id} already exists.")
-                return
-            control_event = asyncio.Event()
-            control_event.set()  # Start as active
-            disconnect_event = asyncio.Event()
-            task = asyncio.create_task(
-                simulate_node(self.uri, node_id, self.interval, self.sample_msg, control_event, self.log_enabled, disconnect_event)
-            )
-            self.node_tasks[node_id] = (task, control_event, disconnect_event)
-            print(f"Node {node_id} added and started.")
+            for node_id in node_ids:
+                if not (0 <= node_id < MAX_NODES):
+                    print(f"Node {node_id} is out of allowed range (0-{MAX_NODES-1}).")
+                    continue
+                if node_id in self.node_tasks:
+                    print(f"Node {node_id} already exists.")
+                    continue
+                control_event = asyncio.Event()
+                control_event.set()  # Start as active
+                disconnect_event = asyncio.Event()
+                task = asyncio.create_task(
+                    simulate_node(self.uri, node_id, self.interval, self.sample_msg, control_event, self.log_enabled, disconnect_event)
+                )
+                self.node_tasks[node_id] = (task, control_event, disconnect_event)
+                print(f"Node {node_id} added and started.")
 
-    async def remove_node(self, node_id):
+    async def remove_node(self, *node_ids):
+        to_remove = []
         async with self.lock:
-            if node_id not in self.node_tasks:
-                print(f"Node {node_id} does not exist.")
-                return
-            task, control_event, disconnect_event = self.node_tasks.pop(node_id)
-            disconnect_event.set()  # Signal node to send disconnect
-            await asyncio.sleep(0.2)  # Give time for disconnect to be sent
-            task.cancel()
+            for node_id in node_ids:
+                if node_id not in self.node_tasks:
+                    print(f"Node {node_id} does not exist.")
+                    continue
+                task, _, disconnect_event = self.node_tasks.pop(node_id)
+                disconnect_event.set()  # signal node to disconnect
+                to_remove.append((node_id, task))
+
+        # wait outside the lock so other ops aren’t blocked
+        for node_id, task in to_remove:
+            try:
+                await asyncio.wait_for(task, timeout=2.0)
+            except asyncio.TimeoutError:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             print(f"Node {node_id} removed.")
 
-    async def pause_node(self, node_id):
-        async with self.lock:
-            if node_id not in self.node_tasks:
-                print(f"Node {node_id} does not exist.")
-                return
-            _, control_event, _ = self.node_tasks[node_id]
-            control_event.clear()
-            print(f"Node {node_id} paused.")
 
-    async def resume_node(self, node_id):
+    async def pause_node(self, *node_ids):
         async with self.lock:
-            if node_id not in self.node_tasks:
-                print(f"Node {node_id} does not exist.")
-                return
-            _, control_event, _ = self.node_tasks[node_id]
-            control_event.set()
-            print(f"Node {node_id} resumed.")
+            for node_id in node_ids:
+                if node_id not in self.node_tasks:
+                    print(f"Node {node_id} does not exist.")
+                    continue
+                _, control_event, _ = self.node_tasks[node_id]
+                control_event.clear()
+                print(f"Node {node_id} paused.")
+
+    async def resume_node(self, *node_ids):
+        async with self.lock:
+            for node_id in node_ids:
+                if node_id not in self.node_tasks:
+                    print(f"Node {node_id} does not exist.")
+                    continue
+                _, control_event, _ = self.node_tasks[node_id]
+                control_event.set()
+                print(f"Node {node_id} resumed.")
 
     async def list_nodes(self):
         async with self.lock:
@@ -188,19 +249,43 @@ class NodeManager:
                 status = "active" if control_event.is_set() else "paused"
                 print(f"  Node {node_id}: {status}")
 
+    async def status_node(self, *node_ids):
+        async with self.lock:
+            for node_id in node_ids:
+                if node_id not in self.node_tasks:
+                    print(f"Node {node_id} does not exist.")
+                    continue
+                task, control_event, _ = self.node_tasks[node_id]
+                status = "active" if control_event.is_set() else "paused"
+                print(f"Node {node_id} status: {status}, task done: {task.done()}")
+
     async def shutdown(self):
         async with self.lock:
-            for node_id, (task, _, disconnect_event) in list(self.node_tasks.items()):
-                disconnect_event.set()
-            await asyncio.sleep(0.2)  # Give time for disconnects
-            for node_id, (task, _, _) in list(self.node_tasks.items()):
-                task.cancel()
+            tasks = list(self.node_tasks.items())
             self.node_tasks.clear()
-            print("All nodes removed.")
+
+        for node_id, (task, _, disconnect_event) in tasks:
+            disconnect_event.set()
+
+        for node_id, (task, _, _) in tasks:
+            try:
+                await asyncio.wait_for(task, timeout=2.0)
+            except asyncio.TimeoutError:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        print("All nodes removed.")
+
 
 async def cli_loop(node_manager, log_enabled):
-    print("\nCommands: add <id>, remove <id>, pause <id>, resume <id>, list, quitnm, exit, done")
-    print("<id>: Node ID to be managed")
+    print("\nCommands: add <id> [<id>...], remove <id> [<id>...], pause <id> [<id>...], resume <id> [<id>...], status <id> [<id>...], list, wipe, exit, done")
+    print("<id>: Node ID(s) to be managed (space-separated)")
+    print("list: List all nodes and their status")
+    print("wipe: Remove all nodes")    
+    print("done: Resume log printing")
+    print("exit: Exit the tester completely")
     loop = asyncio.get_event_loop()
     while True:
         cmd = await loop.run_in_executor(None, sys.stdin.readline)
@@ -210,17 +295,26 @@ async def cli_loop(node_manager, log_enabled):
         if not cmd:
             continue
         action = cmd[0].lower()
-        if action == "add" and len(cmd) == 2:
-            await node_manager.add_node(int(cmd[1]))
-        elif action == "remove" and len(cmd) == 2:
-            await node_manager.remove_node(int(cmd[1]))
-        elif action == "pause" and len(cmd) == 2:
-            await node_manager.pause_node(int(cmd[1]))
-        elif action == "resume" and len(cmd) == 2:
-            await node_manager.resume_node(int(cmd[1]))
+        # Actions with more than one node ID possible
+        if action in {"add", "remove", "pause", "resume", "status"} and len(cmd) >= 2:
+            try:
+                node_ids = [int(x) for x in cmd[1:]]
+            except ValueError:
+                print("Invalid node ID(s). Must be integers.")
+                continue
+            if action == "add":
+                await node_manager.add_node(*node_ids)
+            elif action == "remove":
+                await node_manager.remove_node(*node_ids)
+            elif action == "pause":
+                await node_manager.pause_node(*node_ids)
+            elif action == "resume":
+                await node_manager.resume_node(*node_ids)
+            elif action == "status":
+                await node_manager.status_node(*node_ids)
         elif action == "list":
             await node_manager.list_nodes()
-        elif action == "quitnm":
+        elif action == "wipe":
             await node_manager.shutdown()
             break
         elif action == "exit":
@@ -231,6 +325,8 @@ async def cli_loop(node_manager, log_enabled):
             print("Exiting command mode. Resuming log printing.")
             log_enabled.set()
             break
+        elif action == "cmd":
+            print("Already in command mode.")
         else:
             print("Unknown command.")
 

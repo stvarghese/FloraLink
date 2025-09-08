@@ -636,11 +636,16 @@ static void nodeio_handle_heartbeat(int client_fd)
 static void nodeio_on_close(int client_fd)
 {
     // find node_id from client_fd
-    uint8_t node_id = 0;
+    int node_id = 0;
     // By design, node_id is the same as session_id
     node_id = websockserver_session_find_sessid(client_fd);
+    if (node_id == -1)
+    {
+        ESP_LOGW(TAG, "Invalid node id in server close callback")
+    }
+
     // Handle client disconnection
-    nodeio_handle_disconnect(client_fd, node_id);
+    nodeio_handle_disconnect(client_fd, (uint8_t)node_id);
 }
 
 // Nodeio WebSocket server receive callback

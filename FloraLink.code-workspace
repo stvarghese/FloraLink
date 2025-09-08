@@ -42,7 +42,8 @@
 			"esp_http_server.h": "c",
 			"iterator": "c",
 			"stdbool.h": "c",
-			"sdkconfig.h": "c"
+			"sdkconfig.h": "c",
+			"task.h": "c"
 		},
 		"powershell.cwd": "FloraLink"
 	}

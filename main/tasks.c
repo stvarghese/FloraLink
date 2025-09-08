@@ -32,6 +32,7 @@
 #include "esp_cpu.h"
 
 #include "webserver.h"
+#include "websockserver.h"
 #include "wifi_setup.h"
 #include "nodeio.h"
 
@@ -92,6 +93,7 @@ void monitor_task_1s(void *arg)
         // Update CPU load even if no RMT event
         monitor_update_cpu_load();
         nodeio_monitor_nodeslist();
+        nodeio_active_nodes_ping();
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }

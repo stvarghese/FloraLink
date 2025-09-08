@@ -80,7 +80,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
     if (ws_pkt.type == HTTPD_WS_TYPE_CLOSE)
     {
         int client_fd = httpd_req_to_sockfd(req);
-        websockserver_session_remove(client_fd);
+
         if (close_callback)
         {
             close_callback(client_fd);

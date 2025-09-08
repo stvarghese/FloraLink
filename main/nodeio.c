@@ -87,6 +87,22 @@ static const type_map_t msg_type_map[] = {
     {MSG_TYP_UNKNOWN, MSG_UNKNOWN},
 };
 
+void nodeio_active_nodes_ping(void)
+{
+    for (int i = 0; i < MAX_NODES; ++i)
+    {
+        if (node_contexts[i].p_node && node_contexts[i].p_session && node_contexts[i].p_session->connected)
+        {
+            int client_fd = node_contexts[i].p_session->client_fd;
+            if (client_fd != -1)
+            {
+                ESP_LOGD(TAG, "Pinging node id %d on client_fd %d", node_contexts[i].p_node->node_id, client_fd);
+                websockserver_ping(client_fd);
+            }
+        }
+    }
+}
+
 static inline msg_type_t nodeio_type_str_to_enum(const char *type_str)
 {
     ESP_LOGD(TAG, "Mapping type string: %s to enum", type_str);

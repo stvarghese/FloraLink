@@ -87,7 +87,7 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
     try:
         # === Connect phase ===
         try:
-            websocket = await websockets.connect(uri)
+            websocket = await websockets.connect(uri, ping_timeout=None)
             log(f"[Node {node_id}] Connected to {uri}")
         except Exception as e:
             log(f"[Node {node_id}] Failed to connect: {e}")

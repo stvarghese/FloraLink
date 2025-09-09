@@ -14,6 +14,8 @@ typedef struct
     node_params_t *p_node;
     protocol_msg_t *p_msg;
     wss_session_t *p_session;
+    subscribe_config_t subscription; // Add this line
+    bool subscribed;                 // Track if a subscription is active
 } node_context_t;
 
 static node_context_t node_contexts[MAX_NODES] = {0};
@@ -33,6 +35,20 @@ static const sensor_lookup_t sensor_table[] = {
     {"distance", CAP_DISTANCE, offsetof(sensor_payload_t, distance)},
     {"light", CAP_LIGHTSENSE, offsetof(sensor_payload_t, light)},
     // Add more sensor types as needed
+};
+
+// Service lookup table for dynamic service filter
+typedef struct
+{
+    const char *name;
+    capability_t cap;
+    size_t offset;
+} service_lookup_t;
+
+static const service_lookup_t service_table[] = {
+    {"diagnostics", CAP_DIAG, offsetof(service_payload_t, diagnostic)},
+    {"ota", CAP_OTA, offsetof(service_payload_t, ota_status)},
+    // Add more services as needed
 };
 
 // Per node local sequence number
@@ -128,21 +144,14 @@ static inline capability_t nodeio_build_node_capmask_sensors(cJSON *sensors_arra
             if (sensor_item && cJSON_IsString(sensor_item))
             {
                 const char *sensor_name = sensor_item->valuestring;
-                if (strcmp(sensor_name, "moisture") == 0)
-                    current_mask |= CAP_MOISTURE;
-                else if (strcmp(sensor_name, "temperature") == 0)
-                    current_mask |= CAP_TEMP;
-                else if (strcmp(sensor_name, "humidity") == 0)
-                    current_mask |= CAP_HUMIDITY;
-                else if (strcmp(sensor_name, "distance") == 0)
-                    current_mask |= CAP_DISTANCE;
-                else if (strcmp(sensor_name, "lightsense") == 0)
-                    current_mask |= CAP_LIGHTSENSE;
-                else if (strcmp(sensor_name, "led") == 0)
-                    current_mask |= CAP_LED;
-                else if (strcmp(sensor_name, "buzzer") == 0)
-                    current_mask |= CAP_BUZZER;
-                // Add more mappings as needed
+                for (size_t s = 0; s < sizeof(sensor_table) / sizeof(sensor_table[0]); ++s)
+                {
+                    if (strcmp(sensor_name, sensor_table[s].name) == 0)
+                    {
+                        current_mask |= sensor_table[s].cap;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -161,11 +170,14 @@ static inline capability_t nodeio_build_node_capmask_services(cJSON *services_ar
             if (service_item && cJSON_IsString(service_item))
             {
                 const char *service_name = service_item->valuestring;
-                if (strcmp(service_name, "diagnostic") == 0)
-                    current_mask |= CAP_DIAG;
-                else if (strcmp(service_name, "ota") == 0)
-                    current_mask |= CAP_OTA;
-                // Add more mappings as needed
+                for (size_t s = 0; s < sizeof(service_table) / sizeof(service_table[0]); ++s)
+                {
+                    if (strcmp(service_name, service_table[s].name) == 0)
+                    {
+                        current_mask |= service_table[s].cap;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -283,9 +295,9 @@ static inline esp_err_t nodeio_parse_message_payload(cJSON *root, capability_t n
                     if (status_code_item && cJSON_IsNumber(status_code_item) &&
                         message_item && cJSON_IsString(message_item))
                     {
-                        p_currentmsg->payload.data[i].datafields.ota_status.status_code = status_code_item->valueint;
-                        strncpy(p_currentmsg->payload.data[i].datafields.ota_status.message, message_item->valuestring, sizeof(p_currentmsg->payload.data[i].datafields.ota_status.message) - 1);
-                        p_currentmsg->payload.data[i].datafields.ota_status.message[sizeof(p_currentmsg->payload.data[i].datafields.ota_status.message) - 1] = '\0';
+                        p_currentmsg->payload.data[i].datafields.service.ota_status.status_code = status_code_item->valueint;
+                        strncpy(p_currentmsg->payload.data[i].datafields.service.ota_status.message, message_item->valuestring, sizeof(p_currentmsg->payload.data[i].datafields.service.ota_status.message) - 1);
+                        p_currentmsg->payload.data[i].datafields.service.ota_status.message[sizeof(p_currentmsg->payload.data[i].datafields.service.ota_status.message) - 1] = '\0';
                         p_currentmsg->payload.data[i].current_cap_mask |= CAP_OTA;
                     }
                 }
@@ -305,10 +317,10 @@ static inline esp_err_t nodeio_parse_message_payload(cJSON *root, capability_t n
                         rssi_item && cJSON_IsNumber(rssi_item) &&
                         error_code_item && cJSON_IsNumber(error_code_item))
                     {
-                        p_currentmsg->payload.data[i].datafields.diagnostic.uptime_sec = uptime_item->valueint;
-                        p_currentmsg->payload.data[i].datafields.diagnostic.free_heap = free_heap_item->valueint;
-                        p_currentmsg->payload.data[i].datafields.diagnostic.rssi = rssi_item->valueint;
-                        p_currentmsg->payload.data[i].datafields.diagnostic.error_code = error_code_item->valueint;
+                        p_currentmsg->payload.data[i].datafields.service.diagnostic.uptime_sec = uptime_item->valueint;
+                        p_currentmsg->payload.data[i].datafields.service.diagnostic.free_heap = free_heap_item->valueint;
+                        p_currentmsg->payload.data[i].datafields.service.diagnostic.rssi = rssi_item->valueint;
+                        p_currentmsg->payload.data[i].datafields.service.diagnostic.error_code = error_code_item->valueint;
                         p_currentmsg->payload.data[i].current_cap_mask |= CAP_DIAG;
                     }
                 }
@@ -521,16 +533,105 @@ static void nodeio_broadcast(const char *message, size_t len)
 
 static void nodeio_subscribe_to_node(int client_fd, const subscribe_config_t *config)
 {
-    // Handle subscription request from node
-    // Store the subscription config for this client_fd
-    // Example: update a struct or database with the subscription details
+    for (int i = 0; i < MAX_NODES; ++i)
+    {
+        if (node_contexts[i].p_session && node_contexts[i].p_session->client_fd == client_fd)
+        {
+            cJSON *root = cJSON_CreateObject();
+            cJSON *payload = cJSON_CreateObject();
+            if (config)
+            {
+                node_contexts[i].subscription = *config;
+                node_contexts[i].subscribed = true;
+                ESP_LOGI(TAG, "Node %d subscribed: mask=0x%08X, interval=%u ms", i, config->subscribe_mask, config->interval_ms);
+                // Header fields
+                cJSON_AddNumberToObject(root, "magic", PROTOCOL_MAGIC);
+                cJSON_AddStringToObject(root, "type", MSG_TYP_SUBSCRIBE);
+                cJSON_AddNumberToObject(root, "node_id", i);
+                cJSON_AddNumberToObject(root, "seq_num", node_local_seq[i]++);
+                cJSON_AddNumberToObject(root, "timestamp", (uint32_t)time(NULL));
+                // Payload
+                cJSON_AddStringToObject(payload, "status", "subscribed");
+                // Filter (example: sensors/services hardcoded for now)
+                cJSON *filter = cJSON_CreateObject();
+                cJSON *sensors = cJSON_CreateArray();
+                // Dynamically add sensors based on subscribe_mask using sensor_table
+                for (size_t s = 0; s < sizeof(sensor_table) / sizeof(sensor_table[0]); ++s)
+                {
+                    if (config->subscribe_mask & sensor_table[s].cap)
+                    {
+                        cJSON_AddItemToArray(sensors, cJSON_CreateString(sensor_table[s].name));
+                    }
+                }
+                cJSON_AddItemToObject(filter, "sensors", sensors);
+                // Dynamically add services based on subscribe_mask using service_table
+                cJSON *services = cJSON_CreateArray();
+                for (size_t s = 0; s < sizeof(service_table) / sizeof(service_table[0]); ++s)
+                {
+                    if (config->subscribe_mask & service_table[s].cap)
+                    {
+                        cJSON_AddItemToArray(services, cJSON_CreateString(service_table[s].name));
+                    }
+                }
+                cJSON_AddItemToObject(filter, "services", services);
+                cJSON_AddItemToObject(payload, "filter", filter);
+                cJSON_AddNumberToObject(payload, "interval", config->interval_ms);
+                cJSON_AddItemToObject(root, "payload", payload);
+            }
+            else
+            {
+                node_contexts[i].subscribed = false;
+                ESP_LOGI(TAG, "Node %d unsubscribed (null config)", i);
+                cJSON_AddNumberToObject(root, "magic", PROTOCOL_MAGIC);
+                cJSON_AddStringToObject(root, "type", MSG_TYP_SUBSCRIBE);
+                cJSON_AddNumberToObject(root, "node_id", i);
+                cJSON_AddNumberToObject(root, "seq_num", node_local_seq[i]++);
+                cJSON_AddNumberToObject(root, "timestamp", (uint32_t)time(NULL));
+                cJSON_AddStringToObject(payload, "status", "unsubscribed");
+                cJSON_AddItemToObject(root, "payload", payload);
+            }
+            char *msg = cJSON_PrintUnformatted(root);
+            if (msg)
+            {
+                websockserver_send(client_fd, msg, strlen(msg));
+                cJSON_free(msg);
+            }
+            cJSON_Delete(root);
+            return;
+        }
+    }
+    ESP_LOGW(TAG, "Subscribe: client_fd %d not found", client_fd);
 }
 
 static void nodeio_unsubscribe_from_node(int client_fd)
 {
-    // Handle unsubscription request from node
-    // Remove the subscription config for this client_fd
-    // Example: update a struct or database to remove the subscription details
+    for (int i = 0; i < MAX_NODES; ++i)
+    {
+        if (node_contexts[i].p_session && node_contexts[i].p_session->client_fd == client_fd)
+        {
+            node_contexts[i].subscribed = false;
+            ESP_LOGI(TAG, "Node %d unsubscribed", i);
+            // Notify node of unsubscription (protocol-compliant)
+            cJSON *root = cJSON_CreateObject();
+            cJSON *payload = cJSON_CreateObject();
+            cJSON_AddNumberToObject(root, "magic", PROTOCOL_MAGIC);
+            cJSON_AddStringToObject(root, "type", MSG_TYP_SUBSCRIBE);
+            cJSON_AddNumberToObject(root, "node_id", i);
+            cJSON_AddNumberToObject(root, "seq_num", node_local_seq[i]++);
+            cJSON_AddNumberToObject(root, "timestamp", (uint32_t)time(NULL));
+            cJSON_AddStringToObject(payload, "status", "unsubscribed");
+            cJSON_AddItemToObject(root, "payload", payload);
+            char *msg = cJSON_PrintUnformatted(root);
+            if (msg)
+            {
+                websockserver_send(client_fd, msg, strlen(msg));
+                cJSON_free(msg);
+            }
+            cJSON_Delete(root);
+            return;
+        }
+    }
+    ESP_LOGW(TAG, "Unsubscribe: client_fd %d not found", client_fd);
 }
 
 static void nodeio_request_ota(int client_fd, const ota_request_t *ota)
@@ -711,11 +812,11 @@ void nodeio_monitor_nodeslist(void)
                 // Print each service diag or ota value if present
                 if (node_contexts[i].p_msg->payload.data[j].current_cap_mask & CAP_DIAG)
                 {
-                    // ESP_LOGI(TAG, "Node %d service payload: Diag: %d", i, node_contexts[i].p_msg->payload.data[j].datafields.diagnostic.error_code);
+                    // ESP_LOGI(TAG, "Node %d service payload: Diag: %d", i, node_contexts[i].p_msg->payload.data[j].datafields.service.diagnostic.error_code);
                 }
                 if (node_contexts[i].p_msg->payload.data[j].current_cap_mask & CAP_OTA)
                 {
-                    // ESP_LOGI(TAG, "Node %d service payload: OTA: %s", i, node_contexts[i].p_msg->payload.data[j].datafields.ota_status.message);
+                    // ESP_LOGI(TAG, "Node %d service payload: OTA: %s", i, node_contexts[i].p_msg->payload.data[j].datafields.service.ota_status.message);
                 }
             }
             // Log if node is online

@@ -104,7 +104,7 @@ typedef enum
 char MSG_TYP_CONNECT[] = "connect";
 char MSG_TYP_CONNECT_RESPONSE[] = "connect_response";
 char MSG_TYP_NODE_DATA[] = "node_data";
-char MSG_TYP_SUBSCRIBE[] = "subscribe";
+char MSG_TYP_SUBSCRIBE[] = "notify_subscription";
 char MSG_TYP_POLL_DATA[] = "poll_data";
 char MSG_TYP_OTA_REQUEST[] = "ota_request";
 char MSG_TYP_OTA_STATUS[] = "ota_status";
@@ -142,6 +142,7 @@ typedef struct
     char version[16];
 } ota_request_t;
 
+// --- OTA/update status payload ---
 typedef struct
 {
     int status_code;
@@ -157,6 +158,14 @@ typedef struct
     int error_code;
 } diagnostic_payload_t;
 
+// --- Service payload: combines OTA status and diagnostic/health payload ---
+typedef struct
+{
+    ota_status_t ota_status;
+    diagnostic_payload_t diagnostic;
+    // Add more service payloads as needed
+} service_payload_t;
+
 // Payload type containing union of data type and total number of payload packets
 typedef struct
 {
@@ -164,8 +173,7 @@ typedef struct
     union
     {
         sensor_payload_t sensor;
-        ota_status_t ota_status;
-        diagnostic_payload_t diagnostic;
+        service_payload_t service;
     } datafields;
 } data_t;
 

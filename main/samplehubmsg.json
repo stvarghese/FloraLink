@@ -1,0 +1,55 @@
+{
+    "magic": 305419896,
+    "type": "subscribe",
+    "node_id": 1,
+    "seq_num": 42,
+    "timestamp": 1725974400,
+    "payload": {
+        "status": "subscribed",
+        "filter": {
+            "sensors": [
+                "temperature",
+                "humidity"
+            ],
+            "services": [
+                "diagnostics"
+            ]
+        },
+        "interval": 1000
+    }
+}
+
+{
+    "magic": 305419896,
+    "type": "subscribe",
+    "node_id": 1,
+    "seq_num": 43,
+    "timestamp": 1725974401,
+    "payload": {
+        "status": "unsubscribed"
+    }
+}
+
+{
+    "type": "connect_response",
+    "node_id": 1,
+    "seq_num": 44,
+    "timestamp": 1725974402,
+    "status": "accepted"
+}
+
+{
+    "type": "error",
+    "node_id": 1,
+    "message": "Invalid protocol magic"
+}
+
+{
+    "type": "heartbeat_ack",
+    "node_id": 1
+}
+
+{
+    "type": "diag_request",
+    "node_id": 1
+}

@@ -11,7 +11,7 @@
         "moisture"
     ],
     "services": [
-        "diagnostic",
+        "diagnostics",
         "ota"
     ],
     "payload": [

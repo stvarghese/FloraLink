@@ -94,6 +94,7 @@ void monitor_task_1s(void *arg)
         monitor_update_cpu_load();
         nodeio_monitor_nodeslist();
         nodeio_active_nodes_ping();
+        nodeio_process_subscription_updates();
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }
@@ -143,7 +144,7 @@ static void init_task(void *pvParameters)
     monitor_init();
     xTaskCreate(led_task, "led_task", 2048, NULL, 5, NULL);
     xTaskCreate(distance_task, "distance_task", 8192, NULL, 5, NULL);
-    xTaskCreate(monitor_task_1s, "monitor_task_1s", 2048, NULL, 5, NULL);
+    xTaskCreate(monitor_task_1s, "monitor_task_1s", 4096, NULL, 5, NULL);
     xTaskCreate(monitor_task_rmt, "monitor_task_rmt", 4096, NULL, 5, NULL);
     vTaskDelete(NULL);
 }

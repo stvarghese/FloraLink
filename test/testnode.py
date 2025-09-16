@@ -28,7 +28,7 @@ def build_base_message(msg_type, node_id, seq_num):
         "type": msg_type,
         "node_id": node_id,
         "sensors": ["temperature", "humidity", "moisture"],
-        "services": ["diagnostic", "ota"],
+        "services": ["diagnostics", "ota"],
         "seq_num": seq_num,
         "timestamp": int(time.time()),
     }

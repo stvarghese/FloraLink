@@ -44,7 +44,8 @@
 			"stdbool.h": "c",
 			"sdkconfig.h": "c",
 			"task.h": "c",
-			"format": "c"
+			"format": "c",
+			"system_error": "c"
 		},
 		"powershell.cwd": "FloraLink"
 	}

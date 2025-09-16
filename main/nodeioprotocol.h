@@ -120,7 +120,7 @@ char MSG_TYP_UNKNOWN[] = "unknown";
 
 // --- JSON Type Strings for different payload types ---
 char MSG_PAYLOAD_TYPE_SENSOR[] = "sensor";
-char MSG_PAYLOAD_TYPE_DIAGNOSTIC[] = "diagnostic";
+char MSG_PAYLOAD_TYPE_DIAGNOSTIC[] = "diagnostics";
 char MSG_PAYLOAD_TYPE_OTA_STATUS[] = "ota_status";
 // more to be added
 
@@ -162,7 +162,7 @@ typedef struct
 typedef struct
 {
     ota_status_t ota_status;
-    diagnostic_payload_t diagnostic;
+    diagnostic_payload_t diagnostics;
     // Add more service payloads as needed
 } service_payload_t;
 

@@ -15,6 +15,7 @@ wss_session_t *websockserver_session_update(int client_fd, int session_id)
         return NULL;
     wss_activesessions[session_id].client_fd = client_fd;
     wss_activesessions[session_id].connected = true;
+    ESP_LOGI(TAG, "Session context updated for node: session_id=%d, client_fd=%d", session_id, client_fd);
     return &wss_activesessions[session_id];
 }
 

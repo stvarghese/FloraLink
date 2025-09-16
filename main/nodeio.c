@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "nodeioprotocol.h"
 #include "cJSON.h"
+#include <time.h>
 
 // Maximum num of nodes shall be equal to the maximum number of sessions
 #define MAX_NODES MAX_SESSIONS
@@ -16,6 +17,7 @@ typedef struct
     wss_session_t *p_session;
     subscribe_config_t subscription; // Add this line
     bool subscribed;                 // Track if a subscription is active
+    bool subscription_update;        // Track if subscription parameters were updated
 } node_context_t;
 
 static node_context_t node_contexts[MAX_NODES] = {0};
@@ -46,7 +48,7 @@ typedef struct
 } service_lookup_t;
 
 static const service_lookup_t service_table[] = {
-    {"diagnostics", CAP_DIAG, offsetof(service_payload_t, diagnostic)},
+    {"diagnostics", CAP_DIAG, offsetof(service_payload_t, diagnostics)},
     {"ota", CAP_OTA, offsetof(service_payload_t, ota_status)},
     // Add more services as needed
 };
@@ -121,7 +123,7 @@ void nodeio_active_nodes_ping(void)
 
 static inline msg_type_t nodeio_type_str_to_enum(const char *type_str)
 {
-    ESP_LOGD(TAG, "Mapping type string: %s to enum", type_str);
+    // ESP_LOGD(TAG, "Mapping type string: %s to enum", type_str);
     if (!type_str)
         return MSG_UNKNOWN;
     for (size_t i = 0; i < sizeof(msg_type_map) / sizeof(msg_type_map[0]); ++i)
@@ -200,6 +202,8 @@ static inline node_params_t *nodeio_update_node_params_from_json(uint8_t node_id
         return NULL;
     }
 
+    // node id, should be the same as node context array index
+    node->node_id = node_id;
     node->controller = cJSON_GetObjectItem(root, "controller") ? (controller_type_t)cJSON_GetObjectItem(root, "controller")->valueint : CONTROLLER_UNKNOWN;
     node->capability_mask |= nodeio_build_node_capmask_sensors(cJSON_GetObjectItem(root, "sensors"), node->capability_mask);
     node->capability_mask |= nodeio_build_node_capmask_services(cJSON_GetObjectItem(root, "services"), node->capability_mask);
@@ -317,10 +321,10 @@ static inline esp_err_t nodeio_parse_message_payload(cJSON *root, capability_t n
                         rssi_item && cJSON_IsNumber(rssi_item) &&
                         error_code_item && cJSON_IsNumber(error_code_item))
                     {
-                        p_currentmsg->payload.data[i].datafields.service.diagnostic.uptime_sec = uptime_item->valueint;
-                        p_currentmsg->payload.data[i].datafields.service.diagnostic.free_heap = free_heap_item->valueint;
-                        p_currentmsg->payload.data[i].datafields.service.diagnostic.rssi = rssi_item->valueint;
-                        p_currentmsg->payload.data[i].datafields.service.diagnostic.error_code = error_code_item->valueint;
+                        p_currentmsg->payload.data[i].datafields.service.diagnostics.uptime_sec = uptime_item->valueint;
+                        p_currentmsg->payload.data[i].datafields.service.diagnostics.free_heap = free_heap_item->valueint;
+                        p_currentmsg->payload.data[i].datafields.service.diagnostics.rssi = rssi_item->valueint;
+                        p_currentmsg->payload.data[i].datafields.service.diagnostics.error_code = error_code_item->valueint;
                         p_currentmsg->payload.data[i].current_cap_mask |= CAP_DIAG;
                     }
                 }
@@ -452,6 +456,7 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
     // For new, valid conn requests, check and create a new node context
     if (msg_type == MSG_CONNECT_REQUEST)
     {
+        ESP_LOGD(TAG, "Connect message from node_id %d: %s", node_id, cJSON_PrintUnformatted(root));
         if (NULL == nodeio_handle_connect(client_fd, node_id, root))
         {
             nodeio_handle_error(client_fd, "Failed to connect");
@@ -465,6 +470,8 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
             {
                 // Successfully connected, send response
                 nodeio_send_connect_response(client_fd, seq_num);
+                // Trigger initial subscription update
+                node_contexts[node_id].subscription_update = true;
             }
             cJSON_Delete(root);
             return;
@@ -531,24 +538,36 @@ static void nodeio_broadcast(const char *message, size_t len)
     }
 }
 
-static void nodeio_subscribe_to_node(int client_fd, const subscribe_config_t *config)
+static void nodeio_subscribe_to_node(int node_id, const subscribe_config_t *config)
 {
-    for (int i = 0; i < MAX_NODES; ++i)
+    int client_fd = websockserver_session_find_fd(node_id);
+    // Find the node context associated with this client_fd
+    if (node_id < 0 || node_id >= MAX_NODES)
     {
-        if (node_contexts[i].p_session && node_contexts[i].p_session->client_fd == client_fd)
+        ESP_LOGW(TAG, "Subscribe: Invalid node_id for client_fd %d", client_fd);
+        return;
+    }
+
+    if ((node_contexts[node_id].p_session) && (node_contexts[node_id].p_session->client_fd == client_fd))
+    {
+        // Check if subscription is to be updated
+        if (node_contexts[node_id].subscription_update == true)
         {
             cJSON *root = cJSON_CreateObject();
             cJSON *payload = cJSON_CreateObject();
             if (config)
             {
-                node_contexts[i].subscription = *config;
-                node_contexts[i].subscribed = true;
-                ESP_LOGI(TAG, "Node %d subscribed: mask=0x%08X, interval=%u ms", i, config->subscribe_mask, config->interval_ms);
+                // update the node subscription parameters
+                node_contexts[node_id].subscription.subscribe_mask = config->subscribe_mask;
+                node_contexts[node_id].subscription.interval_ms = config->interval_ms;
+                node_contexts[node_id].subscribed = true;
+
+                ESP_LOGI(TAG, "Node %d subscribed: mask=0x%08X, interval=%u ms", node_id, config->subscribe_mask, config->interval_ms);
                 // Header fields
                 cJSON_AddNumberToObject(root, "magic", PROTOCOL_MAGIC);
                 cJSON_AddStringToObject(root, "type", MSG_TYP_SUBSCRIBE);
-                cJSON_AddNumberToObject(root, "node_id", i);
-                cJSON_AddNumberToObject(root, "seq_num", node_local_seq[i]++);
+                cJSON_AddNumberToObject(root, "node_id", node_id);
+                cJSON_AddNumberToObject(root, "seq_num", node_local_seq[node_id]++);
                 cJSON_AddNumberToObject(root, "timestamp", (uint32_t)time(NULL));
                 // Payload
                 cJSON_AddStringToObject(payload, "status", "subscribed");
@@ -580,12 +599,14 @@ static void nodeio_subscribe_to_node(int client_fd, const subscribe_config_t *co
             }
             else
             {
-                node_contexts[i].subscribed = false;
-                ESP_LOGI(TAG, "Node %d unsubscribed (null config)", i);
+                node_contexts[node_id].subscribed = false;
+                node_contexts[node_id].subscription.subscribe_mask = 0;
+                node_contexts[node_id].subscription.interval_ms = 0;
+                ESP_LOGI(TAG, "Node %d unsubscribed (null config)", node_id);
                 cJSON_AddNumberToObject(root, "magic", PROTOCOL_MAGIC);
                 cJSON_AddStringToObject(root, "type", MSG_TYP_SUBSCRIBE);
-                cJSON_AddNumberToObject(root, "node_id", i);
-                cJSON_AddNumberToObject(root, "seq_num", node_local_seq[i]++);
+                cJSON_AddNumberToObject(root, "node_id", node_id);
+                cJSON_AddNumberToObject(root, "seq_num", node_local_seq[node_id]++);
                 cJSON_AddNumberToObject(root, "timestamp", (uint32_t)time(NULL));
                 cJSON_AddStringToObject(payload, "status", "unsubscribed");
                 cJSON_AddItemToObject(root, "payload", payload);
@@ -596,11 +617,48 @@ static void nodeio_subscribe_to_node(int client_fd, const subscribe_config_t *co
                 websockserver_send(client_fd, msg, strlen(msg));
                 cJSON_free(msg);
             }
+
+            node_contexts[node_id].subscription_update = false; // Reset the update flag
             cJSON_Delete(root);
             return;
         }
+        else
+        {
+            ESP_LOGI(TAG, "No subscription update triggered for node id: %d", node_id);
+        }
     }
-    ESP_LOGW(TAG, "Subscribe: client_fd %d not found", client_fd);
+
+    ESP_LOGW(TAG, "Subscribe: client_fd %d not found, node id: %d", client_fd, node_id);
+    // check which parameter is causing the issue
+    if (!node_contexts[node_id].p_session)
+    {
+        ESP_LOGW(TAG, "Subscribe: No session for node id %d", node_id);
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Subscribe: Session exists for node id %d, client_fd: %d, connected: %d", node_id, node_contexts[node_id].p_session->client_fd, node_contexts[node_id].p_session->connected);
+    }
+}
+
+void nodeio_process_subscription_updates(void)
+{
+    for (int i = 0; i < MAX_NODES; ++i)
+    {
+        // check if a node exists on this index
+        if (node_contexts[i].p_node == NULL || node_contexts[i].p_session == NULL || !node_contexts[i].p_session->connected)
+        {
+            continue; // Skip if no node or session
+        }
+
+        // TODO: get sub config from web UI or other source
+        subscribe_config_t sub_config = {
+            .subscribe_mask = node_contexts[i].p_node->capability_mask, // Example: subscribe to all available sensors/services from node
+            .interval_ms = 5000                                         // Example: 5 seconds interval
+        };
+        // Trigger subscription update
+        ESP_LOGI(TAG, "Processing subscription update for node id: %d", i);
+        nodeio_subscribe_to_node(node_contexts[i].p_node->node_id, &sub_config);
+    }
 }
 
 static void nodeio_unsubscribe_from_node(int client_fd)
@@ -649,8 +707,16 @@ static void nodeio_report_ota_status(int client_fd, const ota_status_t *status)
 static void nodeio_send_connect_response(int client_fd, uint32_t seq_num)
 {
     // Send a connection response message back to the node
-    char resp_msg[64];
-    int len = snprintf(resp_msg, sizeof(resp_msg), "{\"type\":\"connect_response\",\"seq_num\":%lu,\"status\":\"accepted\"}", seq_num);
+    char resp_msg[128];
+    // get node_id from session
+    int node_id = websockserver_session_find_sessid(client_fd);
+    ESP_LOGD(TAG, "Sending connect response to node id %d on client_fd %d", node_id, client_fd);
+    int len = snprintf(resp_msg, sizeof(resp_msg), "{\"type\":\"connect_response\",\"node_id\":%d,\"seq_num\":%lu,\"timestamp\":%lu,\"status\":\"accepted\"}", node_id, seq_num, (uint32_t)time(NULL));
+    if (len < 0 || len >= (int)sizeof(resp_msg))
+    {
+        ESP_LOGE(TAG, "Connect response message truncated or error occurred");
+        return;
+    }
     websockserver_send(client_fd, resp_msg, len);
 }
 
@@ -806,17 +872,17 @@ void nodeio_monitor_nodeslist(void)
                     if (node_contexts[i].p_msg->payload.data[j].current_cap_mask & sensor_table[s].cap)
                     {
                         float *pval = (float *)((uint8_t *)&node_contexts[i].p_msg->payload.data[j].datafields.sensor + sensor_table[s].offset);
-                        // ESP_LOGI(TAG, "Node %d sensor payload: %s: %.2f", i, sensor_table[s].name, *pval);
+                        ESP_LOGI(TAG, "Node %d sensor payload: %s: %.2f", i, sensor_table[s].name, *pval);
                     }
                 }
                 // Print each service diag or ota value if present
                 if (node_contexts[i].p_msg->payload.data[j].current_cap_mask & CAP_DIAG)
                 {
-                    // ESP_LOGI(TAG, "Node %d service payload: Diag: %d", i, node_contexts[i].p_msg->payload.data[j].datafields.service.diagnostic.error_code);
+                    ESP_LOGI(TAG, "Node %d service payload: Diag: %d", i, node_contexts[i].p_msg->payload.data[j].datafields.service.diagnostics.error_code);
                 }
                 if (node_contexts[i].p_msg->payload.data[j].current_cap_mask & CAP_OTA)
                 {
-                    // ESP_LOGI(TAG, "Node %d service payload: OTA: %s", i, node_contexts[i].p_msg->payload.data[j].datafields.service.ota_status.message);
+                    ESP_LOGI(TAG, "Node %d service payload: OTA: %s", i, node_contexts[i].p_msg->payload.data[j].datafields.service.ota_status.message);
                 }
             }
             // Log if node is online

@@ -45,7 +45,10 @@
 			"sdkconfig.h": "c",
 			"task.h": "c",
 			"format": "c",
-			"system_error": "c"
+			"system_error": "c",
+			"nvm.h": "c",
+			"string.h": "c",
+			"ip4_addr.h": "c"
 		},
 		"powershell.cwd": "FloraLink"
 	}

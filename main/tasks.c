@@ -35,6 +35,7 @@
 #include "websockserver.h"
 #include "wifi_setup.h"
 #include "nodeio.h"
+#include "nvm.h"
 
 static const char *TAG = "FloraLink";
 
@@ -101,6 +102,8 @@ void monitor_task_1s(void *arg)
             ping_counter = 0;
         }
         nodeio_process_subscription_updates();
+        // monitor wifi reset button
+        wifi_monitor_reset();
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }
@@ -125,6 +128,13 @@ static void init_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Init task started on core %d", xPortGetCoreID());
     // ESP_LOGI(TAG, "Number of cores: %d", esp_cpu_get_core_count());
+
+    // Initialize NVM for all modules
+    if (nvm_init() != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to initialize NVM storage");
+        vTaskDelete(NULL);
+    }
 
     if (wifi_setup() != ESP_OK)
     {

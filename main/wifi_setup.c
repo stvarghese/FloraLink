@@ -1,15 +1,7 @@
-/**
- * @file wifi_setup.c
- * @brief WiFi initialization and management for FloraLink ESP32 project.
- *
- * This module handles WiFi station mode setup, connection, and exposes the current SSID.
- *
- * Usage:
- * 1. Call wifi_setup() during system initialization.
- * 2. Use wifi_get_ssid() to retrieve the connected SSID for display or diagnostics.
- */
+// FloraLink WiFi Setup - Single Implementation
 
 #include "wifi_setup.h"
+#include "nvm.h"
 #include <string.h>
 #include <esp_wifi.h>
 #include <esp_event.h>
@@ -17,42 +9,80 @@
 #include <nvs_flash.h>
 #include <freertos/event_groups.h>
 #include "lwip/ip4_addr.h"
-#include "sdkconfig.h"
+#include <esp_http_server.h>
 
-#define WIFI_SSID CONFIG_WIFI_SSID
-#define WIFI_PASS CONFIG_WIFI_PASS
+#include "driver/gpio.h"
+
+#include "dns_server.h"
+
 #define WIFI_MAX_RETRY 5
-#define WIFI_CONNECTED_BIT BIT0 ///< Event bit for successful connection
-#define WIFI_FAIL_BIT BIT1      ///< Event bit for connection failure
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT BIT1
 
-// Holds the SSID of the currently configured WiFi network
 static char s_current_ssid[WIFI_SSID_MAX_LEN] = {0};
-// Logging tag for ESP-IDF logging macros
 static const char *TAG = "WiFiSetup";
-// Retry counter for connection attempts
 static int s_retry_num = 0;
-// FreeRTOS event group to signal connection events
 static EventGroupHandle_t s_wifi_event_group;
+static char ap_ssid[32] = "FloraLinkAP";
+static char ap_password[16] = "passcodeflora";
 
-/**
- * @brief Event handler for WiFi and IP events.
- *
- * Handles WiFi start, disconnect, and IP acquisition events.
- * - On start: attempts to connect.
- * - On disconnect: retries up to WIFI_MAX_RETRY, then signals failure.
- * - On IP: signals successful connection.
- */
+// FLASH button GPIO for ESP32-C3 devkit
+#define WIFI_RESET_PIN 9
+
+static void wifi_reset_button_init(void)
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << WIFI_RESET_PIN,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE};
+    gpio_config(&io_conf);
+}
+
+static bool wifi_reset_button_pressed(void)
+{
+    // FLASH button is active LOW
+    return gpio_get_level(WIFI_RESET_PIN) == 0;
+}
+
+void wifi_monitor_reset(void)
+{
+    if (wifi_reset_button_pressed())
+    {
+        ESP_LOGI(TAG, "FLASH button pressed: Erasing WiFi credentials and restarting in AP mode");
+        nvm_erase_block(NVM_BLOCK_WIFI_CREDENTIALS);
+        vTaskDelay(100); // Debounce
+        esp_restart();
+    }
+}
+
+// ===================== Network Stack Initialization Helper =====================
+static void wifi_network_stack_init(bool ap_mode)
+{
+    static bool event_loop_created = false;
+    ESP_ERROR_CHECK(esp_netif_init());
+    if (!event_loop_created)
+    {
+        ESP_ERROR_CHECK(esp_event_loop_create_default());
+        event_loop_created = true;
+    }
+    if (ap_mode)
+        esp_netif_create_default_wifi_ap();
+    else
+        esp_netif_create_default_wifi_sta();
+}
+
+// ===================== WiFi Event Handler =====================
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
     {
-        // WiFi started, attempt to connect
         esp_wifi_connect();
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
     {
-        // Disconnected: retry or signal failure
         if (s_retry_num < WIFI_MAX_RETRY)
         {
             esp_wifi_connect();
@@ -67,7 +97,6 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
-        // Got IP: signal success
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: %s", ip4addr_ntoa((const ip4_addr_t *)&event->ip_info.ip));
         s_retry_num = 0;
@@ -75,32 +104,193 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-/**
- * @brief Initialize WiFi in station mode and connect to the configured SSID.
- *
- * This function sets up the WiFi driver, registers event handlers, and attempts to connect
- * to the WiFi network specified by WIFI_SSID and WIFI_PASS. It blocks until connection or failure.
- *
- * @return ESP_OK on successful connection, ESP_FAIL otherwise.
- */
-esp_err_t wifi_setup(void)
+// ===================== Captive Portal HTTP Handlers =====================
+static esp_err_t credentials_post_handler(httpd_req_t *req)
 {
-    // 1. Create event group for connection events
-    s_wifi_event_group = xEventGroupCreate();
+    char buf[128] = {0};
+    int ret = httpd_req_recv(req, buf, sizeof(buf));
+    if (ret <= 0)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data");
+        return ESP_FAIL;
+    }
+    char ssid[32] = {0}, password[64] = {0};
+    char *ssid_ptr = strstr(buf, "ssid=");
+    char *pass_ptr = strstr(buf, "password=");
+    if (ssid_ptr)
+    {
+        ssid_ptr += 5;
+        char *end = strchr(ssid_ptr, '&');
+        int len = end ? (end - ssid_ptr) : strlen(ssid_ptr);
+        strncpy(ssid, ssid_ptr, len);
+        ssid[len] = '\0';
+    }
+    if (pass_ptr)
+    {
+        pass_ptr += 9;
+        char *end = strchr(pass_ptr, '&');
+        int len = end ? (end - pass_ptr) : strlen(pass_ptr);
+        strncpy(password, pass_ptr, len);
+        password[len] = '\0';
+    }
+    if (strlen(ssid) > 0 && strlen(password) > 0)
+    {
+        strncpy(nvm_wifi_credentials_ram.ssid, ssid, sizeof(nvm_wifi_credentials_ram.ssid));
+        strncpy(nvm_wifi_credentials_ram.password, password, sizeof(nvm_wifi_credentials_ram.password));
+        nvm_write_block(NVM_BLOCK_WIFI_CREDENTIALS, NULL);
+        httpd_resp_sendstr(req, "Credentials saved. Rebooting...");
+        esp_restart();
+        return ESP_OK;
+    }
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid credentials");
+    return ESP_FAIL;
+}
 
-    // 2. Initialize NVS, TCP/IP, and event loop
-    ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+static esp_err_t credentials_get_handler(httpd_req_t *req)
+{
+    const char *form_html =
+        "<!DOCTYPE html>"
+        "<html lang='en'>"
+        "<head>"
+        "<meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+        "<title>FloraLink WiFi Setup</title>"
+        "<style>"
+        "body { background: linear-gradient(135deg, #e0eafc 0%, #cfdef3 100%); min-height: 100vh; margin: 0; font-family: 'Segoe UI', Arial, sans-serif; display: flex; align-items: center; justify-content: center; }"
+        ".card { background: #fff; border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); padding: 2rem 1.5rem; max-width: 350px; width: 100%; }"
+        ".card h2 { margin-top: 0; color: #2d6a4f; font-size: 1.6rem; text-align: center; }"
+        "form { display: flex; flex-direction: column; gap: 1.2rem; }"
+        "input[type='text'], input[type='password'] { padding: 0.8rem; border-radius: 8px; border: 1px solid #b7e4c7; font-size: 1rem; }"
+        "input[type='submit'] { background: #2d6a4f; color: #fff; border: none; border-radius: 8px; padding: 0.8rem; font-size: 1.1rem; cursor: pointer; transition: background 0.2s; }"
+        "input[type='submit']:hover { background: #40916c; }"
+        "label { font-weight: 500; color: #40916c; }"
+        "</style>"
+        "</head>"
+        "<body>"
+        "<div class='card'>"
+        "<h2>FloraLink WiFi Setup</h2>"
+        "<form method='POST' action='/credentials'>"
+        "<label for='ssid'>WiFi SSID</label>"
+        "<input id='ssid' name='ssid' type='text' maxlength='32' required autofocus>"
+        "<label for='password'>WiFi Password</label>"
+        "<input id='password' name='password' type='password' maxlength='64' required>"
+        "<input type='submit' value='Connect'>"
+        "</form>"
+        "</div>"
+        "</body>"
+        "</html>";
+    httpd_resp_sendstr(req, form_html);
+    return ESP_OK;
+}
 
-    // 3. Create default WiFi station
-    esp_netif_create_default_wifi_sta();
-
-    // 4. Initialize WiFi driver
+// ===================== AP Mode Setup =====================
+static esp_err_t wifi_setup_ap_mode(void)
+{
+    ESP_LOGI(TAG, "Starting AP mode for WiFi credential entry");
+    wifi_network_stack_init(true);
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    wifi_config_t ap_config = {0};
+    strncpy((char *)ap_config.ap.ssid, ap_ssid, sizeof(ap_config.ap.ssid));
+    strncpy((char *)ap_config.ap.password, ap_password, sizeof(ap_config.ap.password));
+    ap_config.ap.ssid_len = strlen(ap_ssid);
+    ap_config.ap.max_connection = 4;
+    ap_config.ap.authmode = WIFI_AUTH_WPA_WPA2_PSK;
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
 
-    // 5. Register event handlers for WiFi and IP events
+    // Start DNS hijack server
+    dns_server_start("192.168.4.1");
+
+    httpd_handle_t server = NULL;
+    httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
+    server_config.max_uri_handlers = 4;
+    ESP_ERROR_CHECK(httpd_start(&server, &server_config));
+    httpd_uri_t cred_get = {
+        .uri = "/",
+        .method = HTTP_GET,
+        .handler = credentials_get_handler,
+        .user_ctx = NULL};
+    httpd_uri_t cred_post = {
+        .uri = "/credentials",
+        .method = HTTP_POST,
+        .handler = credentials_post_handler,
+        .user_ctx = NULL};
+    // Captive portal detection handlers
+    httpd_uri_t captive_204 = {
+        .uri = "/generate_204",
+        .method = HTTP_GET,
+        .handler = credentials_get_handler,
+        .user_ctx = NULL};
+    httpd_uri_t captive_hotspot = {
+        .uri = "/hotspot-detect.html",
+        .method = HTTP_GET,
+        .handler = credentials_get_handler,
+        .user_ctx = NULL};
+    httpd_uri_t captive_portal = {
+        .uri = "/captiveportal.html",
+        .method = HTTP_GET,
+        .handler = credentials_get_handler,
+        .user_ctx = NULL};
+    httpd_register_uri_handler(server, &cred_get);
+    httpd_register_uri_handler(server, &cred_post);
+    httpd_register_uri_handler(server, &captive_204);
+    httpd_register_uri_handler(server, &captive_hotspot);
+    httpd_register_uri_handler(server, &captive_portal);
+    ESP_LOGI(TAG, "AP started. Connect to SSID '%s', password '%s', then browse to http://192.168.4.1/", ap_ssid, ap_password);
+    while (1)
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    return ESP_OK;
+}
+
+// Helper function anonymize string (for password display purposes, from starting position for given length)
+static void anonymize_string(char *str, uint8_t pos, size_t len)
+{
+    if (str == NULL || len == 0)
+        return;
+    size_t str_len = strlen(str);
+    if (pos >= str_len)
+        return; // nothing to anonymize
+    size_t end = (pos + len < str_len) ? (pos + len) : str_len;
+    for (size_t i = pos; i < end; i++)
+    {
+        str[i] = '*';
+    }
+}
+
+// ===================== Main WiFi Setup Logic =====================
+esp_err_t wifi_setup(void)
+{
+    bool nvm_ok = nvm_read_block(NVM_BLOCK_WIFI_CREDENTIALS);
+    wifi_config_t wifi_config = {0};
+
+    // Initialize GPIO button for user reset
+    wifi_reset_button_init();
+
+    if (nvm_ok)
+    {
+        strncpy((char *)wifi_config.sta.ssid, nvm_wifi_credentials_ram.ssid, sizeof(wifi_config.sta.ssid));
+        strncpy((char *)wifi_config.sta.password, nvm_wifi_credentials_ram.password, sizeof(wifi_config.sta.password));
+        char password_anon[sizeof(wifi_config.sta.password)];
+        // strncpy copy password to password_anon for anonymizing
+        strncpy(password_anon, (char *)wifi_config.sta.password, sizeof(wifi_config.sta.password));
+        anonymize_string(password_anon, 3, strlen(password_anon)); // anonymize from pos 3
+        ESP_LOGI(TAG, "Read WiFi credentials from NVM: SSID='%s', Password='%s'",
+                 wifi_config.sta.ssid,
+                 password_anon);
+        wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    }
+    else
+    {
+        return wifi_setup_ap_mode();
+    }
+
+    s_wifi_event_group = xEventGroupCreate();
+    ESP_ERROR_CHECK(nvs_flash_init());
+    wifi_network_stack_init(false);
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_t instance_got_ip;
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
@@ -113,56 +303,30 @@ esp_err_t wifi_setup(void)
                                                         &event_handler,
                                                         NULL,
                                                         &instance_got_ip));
-
-    // 6. Configure WiFi connection parameters
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASS,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-        },
-    };
-    // Store SSID for later retrieval
-    strncpy(s_current_ssid, (const char *)wifi_config.sta.ssid, WIFI_SSID_MAX_LEN - 1);
-    s_current_ssid[WIFI_SSID_MAX_LEN - 1] = '\0';
-
-    // 7. Set WiFi mode and apply configuration
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "wifi_init_sta finished.");
-
-    // 8. Wait for connection or failure event
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
                                            pdFALSE,
                                            pdFALSE,
                                            portMAX_DELAY);
 
-    // 9. Return result
     if (bits & WIFI_CONNECTED_BIT)
     {
-        ESP_LOGI(TAG, "connected to ap SSID:%s password:%s", WIFI_SSID, WIFI_PASS);
+        ESP_LOGI(TAG, "Connected to STA SSID:%s", wifi_config.sta.ssid);
+
         return ESP_OK;
-    }
-    else if (bits & WIFI_FAIL_BIT)
-    {
-        ESP_LOGI(TAG, "Failed to connect to SSID:%s, password:%s", WIFI_SSID, WIFI_PASS);
-        return ESP_FAIL;
     }
     else
     {
-        ESP_LOGE(TAG, "UNEXPECTED EVENT");
-        return ESP_FAIL;
+        ESP_LOGI(TAG, "Failed to connect to SSID:%s, fallback to AP mode", wifi_config.sta.ssid);
+        return wifi_setup_ap_mode();
     }
 }
 
-/**
- * @brief Get the SSID of the currently configured WiFi network.
- *
- * @return Pointer to the SSID string.
- */
 const char *wifi_get_ssid(void)
 {
     return s_current_ssid;

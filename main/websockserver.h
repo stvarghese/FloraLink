@@ -14,18 +14,6 @@ typedef struct
     bool connected;
 } wss_session_t;
 
-// Define pong timeout in seconds
-#define WSS_PONG_TIMEOUT 5
-
-// Timer to keep track of time since ping for each client
-static esp_timer_handle_t ws_pong_timers[MAX_SESSIONS] = {NULL};
-
-// Keep track of active pings
-static bool ws_active_pings[MAX_SESSIONS] = {false};
-
-// Pointer to server handle to be used after successful init
-static httpd_handle_t ws_server_handle = NULL;
-
 // Initialize WebSocket server (registers /ws endpoint)
 bool websockserver_init(httpd_handle_t server_handle);
 

@@ -624,20 +624,22 @@ static void nodeio_subscribe_to_node(int node_id, const subscribe_config_t *conf
         }
         else
         {
-            ESP_LOGI(TAG, "No subscription update triggered for node id: %d", node_id);
+            // ESP_LOGI(TAG, "No subscription update triggered for node id: %d", node_id);
         }
-    }
-
-    ESP_LOGW(TAG, "Subscribe: client_fd %d not found, node id: %d", client_fd, node_id);
-    // check which parameter is causing the issue
-    if (!node_contexts[node_id].p_session)
-    {
-        ESP_LOGW(TAG, "Subscribe: No session for node id %d", node_id);
     }
     else
     {
-        ESP_LOGW(TAG, "Subscribe: Session exists for node id %d, client_fd: %d, connected: %d", node_id, node_contexts[node_id].p_session->client_fd, node_contexts[node_id].p_session->connected);
+        ESP_LOGW(TAG, "Subscribe: client_fd %d not found, node id: %d", client_fd, node_id);
     }
+    // check which parameter is causing the issue
+    // if (!node_contexts[node_id].p_session)
+    // {
+    //     ESP_LOGW(TAG, "Subscribe: No session for node id %d", node_id);
+    // }
+    // else
+    // {
+    //     ESP_LOGW(TAG, "Subscribe: Session exists for node id %d, client_fd: %d, connected: %d", node_id, node_contexts[node_id].p_session->client_fd, node_contexts[node_id].p_session->connected);
+    // }
 }
 
 void nodeio_process_subscription_updates(void)
@@ -656,7 +658,7 @@ void nodeio_process_subscription_updates(void)
             .interval_ms = 5000                                         // Example: 5 seconds interval
         };
         // Trigger subscription update
-        ESP_LOGI(TAG, "Processing subscription update for node id: %d", i);
+        // ESP_LOGI(TAG, "Processing subscription update for node id: %d", i);
         nodeio_subscribe_to_node(node_contexts[i].p_node->node_id, &sub_config);
     }
 }
@@ -818,6 +820,7 @@ static void nodeio_handle_heartbeat(int client_fd)
 // Websocket server close callback
 static void nodeio_on_close(int client_fd)
 {
+    ESP_LOGD(TAG, "WebSocket client_fd %d on close callback", client_fd);
     // find node_id from client_fd
     int node_id = 0;
     // By design, node_id is the same as session_id

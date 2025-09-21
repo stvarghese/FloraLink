@@ -93,7 +93,13 @@ void monitor_task_1s(void *arg)
         // Update CPU load even if no RMT event
         monitor_update_cpu_load();
         nodeio_monitor_nodeslist();
-        nodeio_active_nodes_ping();
+        // Ping every 5 seconds
+        static int ping_counter = 0;
+        if (++ping_counter >= 5)
+        {
+            nodeio_active_nodes_ping();
+            ping_counter = 0;
+        }
         nodeio_process_subscription_updates();
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
@@ -140,6 +146,9 @@ static void init_task(void *pvParameters)
         ESP_LOGE(TAG, "Failed to initialize nodeio");
         vTaskDelete(NULL);
     }
+
+    // esp_log_level_set("httpd_ws", ESP_LOG_DEBUG);
+    // esp_log_level_set("httpd_txrx", ESP_LOG_DEBUG);
     blink_init();
     monitor_init();
     xTaskCreate(led_task, "led_task", 2048, NULL, 5, NULL);

@@ -24,6 +24,7 @@
 #include "blink.h"
 #include "distance.h"
 #include "monitor.h"
+#include "gpiobutton.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -102,9 +103,19 @@ void monitor_task_1s(void *arg)
             ping_counter = 0;
         }
         nodeio_process_subscription_updates();
-        // monitor wifi reset button
-        wifi_monitor_reset();
+
         vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+}
+
+void input_process_task(void *arg)
+{
+    ESP_LOGI(TAG, "input_process_task started, on core %d", xPortGetCoreID());
+    while (1)
+    {
+        process_gpiobutton_events();
+        // Always yield to avoid watchdog
+        vTaskDelay(1);
     }
 }
 
@@ -161,10 +172,12 @@ static void init_task(void *pvParameters)
     // esp_log_level_set("httpd_txrx", ESP_LOG_DEBUG);
     blink_init();
     monitor_init();
+    gpiobutton_init(WIFI_RESET_PIN, wifi_reset_button_cb);
     xTaskCreate(led_task, "led_task", 2048, NULL, 5, NULL);
     xTaskCreate(distance_task, "distance_task", 8192, NULL, 5, NULL);
     xTaskCreate(monitor_task_1s, "monitor_task_1s", 4096, NULL, 5, NULL);
     xTaskCreate(monitor_task_rmt, "monitor_task_rmt", 4096, NULL, 5, NULL);
+    xTaskCreate(input_process_task, "input_process_task", 2048, NULL, 10, NULL);
     vTaskDelete(NULL);
 }
 

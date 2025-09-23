@@ -10,10 +10,10 @@
 #include <freertos/event_groups.h>
 #include "lwip/ip4_addr.h"
 #include <esp_http_server.h>
-
+#include <esp_timer.h>
 #include "driver/gpio.h"
-
 #include "dns_server.h"
+#include "commonutils.h"
 
 #define WIFI_MAX_RETRY 5
 #define WIFI_CONNECTED_BIT BIT0
@@ -26,34 +26,63 @@ static EventGroupHandle_t s_wifi_event_group;
 static char ap_ssid[32] = "FloraLinkAP";
 static char ap_password[16] = "passcodeflora";
 
-// FLASH button GPIO for ESP32-C3 devkit
-#define WIFI_RESET_PIN 9
+#include "gpiobutton.h"
 
-static void wifi_reset_button_init(void)
-{
-    gpio_config_t io_conf = {
-        .pin_bit_mask = 1ULL << WIFI_RESET_PIN,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE};
-    gpio_config(&io_conf);
-}
+// Detect N button presses within a time window (ms) -> moved to gpiobutton.c
+// static bool detect_multi_press(int required_presses, int timewindow_ms)
+// {
+//     static int press_count = 0;
+//     static int64_t first_press_time = 0;
+//     static bool prev_pressed = false;
+//     int64_t now = esp_timer_get_time();
+//     bool pressed = wifi_reset_button_pressed();
+//     int64_t window_us = (int64_t)timewindow_ms * 1000;
 
-static bool wifi_reset_button_pressed(void)
-{
-    // FLASH button is active LOW
-    return gpio_get_level(WIFI_RESET_PIN) == 0;
-}
+//     bool rising_edge = pressed && !prev_pressed;
+//     prev_pressed = pressed;
+//     if (rising_edge) // rising edge
+//     {
+//         if (press_count == 0)
+//         {
+//             first_press_time = now;
+//             ESP_LOGD(TAG, "Button first press detected");
+//         }
+//         press_count++;
+//     }
+
+//     // Reset if time window expired
+//     if (press_count > 0 && (now - first_press_time > window_us))
+//     {
+//         ESP_LOGD(TAG, "Button pressed %d time(s)", press_count);
+//         press_count = 0;
+//         first_press_time = 0;
+//     }
+
+//     if (press_count == required_presses && (now - first_press_time <= window_us))
+//     {
+//         ESP_LOGD(TAG, "Button multi-press detected");
+
+//         press_count = 0;
+//         first_press_time = 0;
+//         return true;
+//     }
+//     return false;
+// }
 
 void wifi_monitor_reset(void)
 {
-    if (wifi_reset_button_pressed())
+    ESP_LOGI(TAG, "WiFi reset triggered: Erasing credentials and restarting in AP mode");
+    nvm_erase_block(NVM_BLOCK_WIFI_CREDENTIALS);
+    vTaskDelay(100); // Debounce
+    esp_restart();
+}
+
+// Wrapper to match gpiobutton_callback_t signature
+void wifi_reset_button_cb(uint32_t gpio_num, int64_t *timestamp_us)
+{
+    if (gpio_num == WIFI_RESET_PIN && gpiobutton_detect_multi_press_event(gpio_num, *timestamp_us, 2, 3000))
     {
-        ESP_LOGI(TAG, "FLASH button pressed: Erasing WiFi credentials and restarting in AP mode");
-        nvm_erase_block(NVM_BLOCK_WIFI_CREDENTIALS);
-        vTaskDelay(100); // Debounce
-        esp_restart();
+        wifi_monitor_reset();
     }
 }
 
@@ -183,6 +212,16 @@ static esp_err_t credentials_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ===================== /connecttest.txt Handler =====================
+static esp_err_t connecttest_handler(httpd_req_t *req)
+{
+    // Windows expects HTTP 200 and a short body ("Microsoft Connect Test")
+    const char *body = "Microsoft Connect Test";
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
 // ===================== AP Mode Setup =====================
 static esp_err_t wifi_setup_ap_mode(void)
 {
@@ -233,30 +272,22 @@ static esp_err_t wifi_setup_ap_mode(void)
         .method = HTTP_GET,
         .handler = credentials_get_handler,
         .user_ctx = NULL};
+    // Register /connecttest.txt handler for Windows captive portal detection
+    static const httpd_uri_t connecttest_uri = {
+        .uri = "/connecttest.txt",
+        .method = HTTP_GET,
+        .handler = connecttest_handler,
+        .user_ctx = NULL};
     httpd_register_uri_handler(server, &cred_get);
     httpd_register_uri_handler(server, &cred_post);
     httpd_register_uri_handler(server, &captive_204);
     httpd_register_uri_handler(server, &captive_hotspot);
     httpd_register_uri_handler(server, &captive_portal);
+    httpd_register_uri_handler(server, &connecttest_uri);
     ESP_LOGI(TAG, "AP started. Connect to SSID '%s', password '%s', then browse to http://192.168.4.1/", ap_ssid, ap_password);
     while (1)
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     return ESP_OK;
-}
-
-// Helper function anonymize string (for password display purposes, from starting position for given length)
-static void anonymize_string(char *str, uint8_t pos, size_t len)
-{
-    if (str == NULL || len == 0)
-        return;
-    size_t str_len = strlen(str);
-    if (pos >= str_len)
-        return; // nothing to anonymize
-    size_t end = (pos + len < str_len) ? (pos + len) : str_len;
-    for (size_t i = pos; i < end; i++)
-    {
-        str[i] = '*';
-    }
 }
 
 // ===================== Main WiFi Setup Logic =====================
@@ -265,8 +296,7 @@ esp_err_t wifi_setup(void)
     bool nvm_ok = nvm_read_block(NVM_BLOCK_WIFI_CREDENTIALS);
     wifi_config_t wifi_config = {0};
 
-    // Initialize GPIO button for user reset
-    wifi_reset_button_init();
+    // Wifi reset button init done in init_task()
 
     if (nvm_ok)
     {

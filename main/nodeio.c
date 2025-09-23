@@ -18,6 +18,8 @@ typedef struct
     subscribe_config_t subscription; // Add this line
     bool subscribed;                 // Track if a subscription is active
     bool subscription_update;        // Track if subscription parameters were updated
+    int64_t node_uptime_start;       // Timestamp when node connected
+    int64_t node_uptime;             // Node uptime in seconds
 } node_context_t;
 
 static node_context_t node_contexts[MAX_NODES] = {0};
@@ -468,6 +470,10 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
             // Parse message payload
             if (NULL != nodeio_update_node_params_from_json(node_id, root))
             {
+                // Record the node uptime start time
+                node_contexts[node_id].node_uptime_start = esp_timer_get_time() / 1000000; // in seconds
+                // Reset node uptime
+                node_contexts[node_id].node_uptime = 0;
                 // Successfully connected, send response
                 nodeio_send_connect_response(client_fd, seq_num);
                 // Trigger initial subscription update
@@ -760,6 +766,14 @@ static void nodeio_handle_disconnect(int client_fd, uint8_t node_id)
         node_contexts[node_id].p_msg = NULL;
     }
 
+    // Calculate and log node uptime
+    if (node_contexts[node_id].node_uptime_start != 0)
+    {
+        node_contexts[node_id].node_uptime = (esp_timer_get_time() / 1000000) - node_contexts[node_id].node_uptime_start; // in seconds
+        ESP_LOGI(TAG, "Node %d uptime: %lld seconds", node_id, node_contexts[node_id].node_uptime);
+        node_contexts[node_id].node_uptime_start = 0; // Reset start time
+    }
+
     // Handle client disconnection
     nodeio_unsubscribe_from_node(client_fd);
     websockserver_session_remove(client_fd);
@@ -786,7 +800,7 @@ static node_params_t *nodeio_handle_connect(int client_fd, uint8_t node_id, cJSO
     else
     {
         // Node already exists, reject duplicate connect
-        ESP_LOGD(TAG, "Node %d reconnected", node_id);
+        ESP_LOGD(TAG, "Node %d reconnected, current uptime: %lld seconds", node_id, node_contexts[node_id].node_uptime);
     }
 
     // nodeio_update_node_params_from_json is now handled outside of nodeio_handle_connect
@@ -890,8 +904,34 @@ void nodeio_monitor_nodeslist(void)
             }
             // Log if node is online
             ESP_LOGI(TAG, "Node %d is online", i);
+            // Update and log node uptime
+            if (node_contexts[i].node_uptime_start != 0)
+            {
+                node_contexts[i].node_uptime = (esp_timer_get_time() / 1000000) - node_contexts[i].node_uptime_start; // in seconds
+                int64_t uptime = node_contexts[i].node_uptime;
+                int dd, hh, mm, ss;
+                dd = (int)(uptime / 86400);
+                hh = (int)((uptime / 3600) % 24);
+                mm = (int)((uptime / 60) % 60);
+                ss = (int)(uptime % 60);
+                char uptime_str[32];
+                if (dd > 0)
+                    snprintf(uptime_str, sizeof(uptime_str), "%d:%02d:%02d:%02d", dd, hh, mm, ss);
+                else if (hh > 0)
+                    snprintf(uptime_str, sizeof(uptime_str), "%02d:%02d:%02d", hh, mm, ss);
+                else if (mm > 0)
+                    snprintf(uptime_str, sizeof(uptime_str), "%02d:%02d", mm, ss);
+                else
+                    snprintf(uptime_str, sizeof(uptime_str), "%02d", ss);
+                ESP_LOGI(TAG, "Node %d uptime: %s", i, uptime_str);
+            }
+            else
+            {
+                ESP_LOGD(TAG, "Node %d uptime: not started", i);
+            }
         }
     }
+
     ESP_LOGI(TAG, "-----------------------------------");
 }
 

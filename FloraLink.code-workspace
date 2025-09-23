@@ -48,7 +48,13 @@
 			"system_error": "c",
 			"nvm.h": "c",
 			"string.h": "c",
-			"ip4_addr.h": "c"
+			"ip4_addr.h": "c",
+			"gpiobutton.h": "c",
+			"wifi_setup.h": "c",
+			"queue.h": "c",
+			"commonutils.h": "c",
+			"base64.h": "c",
+			"constant_time_internal.h": "c"
 		},
 		"powershell.cwd": "FloraLink"
 	}

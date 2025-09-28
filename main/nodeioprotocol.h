@@ -101,27 +101,27 @@ typedef enum
 } msg_type_t;
 
 // --- JSON Type Strings for the above message types
-char MSG_TYP_CONNECT[] = "connect";
-char MSG_TYP_CONNECT_RESPONSE[] = "connect_response";
-char MSG_TYP_NODE_DATA[] = "node_data";
-char MSG_TYP_SUBSCRIBE[] = "notify_subscription";
-char MSG_TYP_POLL_DATA[] = "poll_data";
-char MSG_TYP_OTA_REQUEST[] = "ota_request";
-char MSG_TYP_OTA_STATUS[] = "ota_status";
-char MSG_TYP_DIAGNOSTIC[] = "diagnostics";
-char MSG_TYP_DIAGNOSTIC_REQUEST[] = "diagnostic_request";
-char MSG_TYP_ACK[] = "ack";
-char MSG_TYP_HEARTBEAT[] = "heartbeat";
-char MSG_TYP_PING[] = "ping";
-char MSG_TYP_PONG[] = "pong";
-char MSG_TYP_DISCONNECT_REQUEST[] = "disconnect_request";
-char MSG_TYP_ERROR[] = "error";
-char MSG_TYP_UNKNOWN[] = "unknown";
+extern const char MSG_TYP_CONNECT[];
+extern const char MSG_TYP_CONNECT_RESPONSE[];
+extern const char MSG_TYP_NODE_DATA[];
+extern const char MSG_TYP_SUBSCRIBE[];
+extern const char MSG_TYP_POLL_DATA[];
+extern const char MSG_TYP_OTA_REQUEST[];
+extern const char MSG_TYP_OTA_STATUS[];
+extern const char MSG_TYP_DIAGNOSTIC[];
+extern const char MSG_TYP_DIAGNOSTIC_REQUEST[];
+extern const char MSG_TYP_ACK[];
+extern const char MSG_TYP_HEARTBEAT[];
+extern const char MSG_TYP_PING[];
+extern const char MSG_TYP_PONG[];
+extern const char MSG_TYP_DISCONNECT_REQUEST[];
+extern const char MSG_TYP_ERROR[];
+extern const char MSG_TYP_UNKNOWN[];
 
 // --- JSON Type Strings for different payload types ---
-char MSG_PAYLOAD_TYPE_SENSOR[] = "sensor";
-char MSG_PAYLOAD_TYPE_DIAGNOSTIC[] = "diagnostics";
-char MSG_PAYLOAD_TYPE_OTA_STATUS[] = "ota_status";
+extern const char MSG_PAYLOAD_TYPE_SENSOR[];
+extern const char MSG_PAYLOAD_TYPE_DIAGNOSTIC[];
+extern const char MSG_PAYLOAD_TYPE_OTA_STATUS[];
 // more to be added
 
 // --- Sensor Data payload ---

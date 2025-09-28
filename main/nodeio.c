@@ -935,6 +935,99 @@ void nodeio_monitor_nodeslist(void)
     ESP_LOGI(TAG, "-----------------------------------");
 }
 
+size_t nodeio_publish_nodeslist(char *json, size_t json_size)
+{
+    int offset = 0;
+    int node_count = 0;
+
+    // ESP_LOGD(TAG, "nodeio_publish_nodeslist called");
+
+    offset += snprintf(json + offset, json_size - offset, "[");
+
+    int first_node = 1;
+
+    for (int i = 0; i < MAX_NODES; i++)
+    {
+        node_context_t *ctx = &node_contexts[i];
+
+        // ESP_LOGD(TAG, "Node context %d: p_node=%p, p_session=%p, p_msg=%p",
+        //          i, (void *)ctx->p_node, (void *)ctx->p_session, (void *)ctx->p_msg);
+
+        if (ctx->p_node && ctx->p_session && ctx->p_session->connected &&
+            ctx->p_node->current_state == NODEIO_STATE_CONNECTED)
+        {
+            node_count++;
+            if (!first_node)
+                offset += snprintf(json + offset, json_size - offset, ",");
+            first_node = 0;
+
+            int connected = 1;
+            int64_t uptime = ctx->node_uptime;
+
+            offset += snprintf(json + offset, json_size - offset,
+                               "{\"id\":%d,\"connected\":%d,\"uptime\":%lld,\"sensors\":{",
+                               ctx->p_node->node_id, connected, uptime);
+
+            // Sensors
+            int first_sensor = 1;
+            for (size_t s = 0; s < sizeof(sensor_table) / sizeof(sensor_table[0]); ++s)
+            {
+                if (ctx->p_msg && ctx->p_msg->payload.payload_count > 0 &&
+                    (ctx->p_msg->payload.data[0].current_cap_mask & sensor_table[s].cap))
+                {
+                    float *pval = (float *)((uint8_t *)&ctx->p_msg->payload.data[0].datafields.sensor + sensor_table[s].offset);
+                    if (!first_sensor)
+                        offset += snprintf(json + offset, json_size - offset, ",");
+                    first_sensor = 0;
+                    offset += snprintf(json + offset, json_size - offset,
+                                       "\"%s\":%.2f", sensor_table[s].name, *pval);
+                }
+            }
+
+            offset += snprintf(json + offset, json_size - offset, "},\"services\":{");
+
+            // Services
+            int first_service = 1;
+            for (size_t s = 0; s < sizeof(service_table) / sizeof(service_table[0]); ++s)
+            {
+                if (ctx->p_msg && ctx->p_msg->payload.payload_count > 0 &&
+                    (ctx->p_msg->payload.data[0].current_cap_mask & service_table[s].cap))
+                {
+                    if (!first_service)
+                        offset += snprintf(json + offset, json_size - offset, ",");
+                    first_service = 0;
+
+                    if (service_table[s].cap == CAP_DIAG)
+                    {
+                        int err = ctx->p_msg->payload.data[0].datafields.service.diagnostics.error_code;
+                        offset += snprintf(json + offset, json_size - offset,
+                                           "\"diagnostics\":%d", err);
+                    }
+                    else if (service_table[s].cap == CAP_OTA)
+                    {
+                        const char *msg = ctx->p_msg->payload.data[0].datafields.service.ota_status.message;
+                        offset += snprintf(json + offset, json_size - offset,
+                                           "\"ota\":\"%s\"", msg ? msg : "");
+                    }
+                }
+            }
+
+            offset += snprintf(json + offset, json_size - offset, "}}");
+        }
+    }
+
+    offset += snprintf(json + offset, json_size - offset, "]");
+
+    // Ensure null termination within buffer
+    if (offset >= json_size)
+        offset = json_size - 1;
+    json[offset] = '\0';
+
+    // ESP_LOGI(TAG, "nodeio_publish_nodeslist: published %d nodes, JSON length: %d", node_count, offset);
+
+    return offset;
+}
+
 // Initialize nodeio(websocket) and wait for incoming connection requests
 esp_err_t nodeio_init(void)
 {

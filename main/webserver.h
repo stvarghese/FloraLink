@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <esp_err.h>
+#include "nodeio.h"
 
 // Initialize the web server
 esp_err_t webserver_init(void);

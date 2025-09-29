@@ -964,29 +964,39 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
             int connected = 1;
             int64_t uptime = ctx->node_uptime;
 
-            offset += snprintf(json + offset, json_size - offset,
-                               "{\"id\":%d,\"connected\":%d,\"uptime\":%lld,\"sensors\":{",
-                               ctx->p_node->node_id, connected, uptime);
+            // Map backend fields to frontend expectations
+            const char *status = "Online";
+            int uptime_s = (int)uptime;
+            float temp = 0, humid = 0, batt = 0, moisture = 0;
+            int has_temp = 0, has_humid = 0, has_batt = 0, has_moisture = 0;
 
-            // Sensors
+            offset += snprintf(json + offset, json_size - offset,
+                               "{\"id\":%d,\"status\":\"%s\",\"uptime_s\":%d,",
+                               ctx->p_node->node_id, status, uptime_s);
+
+            // Sensors: output all available from sensor_table
             int first_sensor = 1;
             for (size_t s = 0; s < sizeof(sensor_table) / sizeof(sensor_table[0]); ++s)
             {
+                if (!first_sensor)
+                {
+                    offset += snprintf(json + offset, json_size - offset, ",");
+                }
+                first_sensor = 0;
                 if (ctx->p_msg && ctx->p_msg->payload.payload_count > 0 &&
                     (ctx->p_msg->payload.data[0].current_cap_mask & sensor_table[s].cap))
                 {
                     float *pval = (float *)((uint8_t *)&ctx->p_msg->payload.data[0].datafields.sensor + sensor_table[s].offset);
-                    if (!first_sensor)
-                        offset += snprintf(json + offset, json_size - offset, ",");
-                    first_sensor = 0;
-                    offset += snprintf(json + offset, json_size - offset,
-                                       "\"%s\":%.2f", sensor_table[s].name, *pval);
+                    offset += snprintf(json + offset, json_size - offset, "\"%s\":%.2f", sensor_table[s].name, *pval);
+                }
+                else
+                {
+                    offset += snprintf(json + offset, json_size - offset, "\"%s\":null", sensor_table[s].name);
                 }
             }
 
-            offset += snprintf(json + offset, json_size - offset, "},\"services\":{");
-
-            // Services
+            // Services: output all available from service_table
+            offset += snprintf(json + offset, json_size - offset, ",\"services\":{");
             int first_service = 1;
             for (size_t s = 0; s < sizeof(service_table) / sizeof(service_table[0]); ++s)
             {
@@ -996,22 +1006,23 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
                     if (!first_service)
                         offset += snprintf(json + offset, json_size - offset, ",");
                     first_service = 0;
-
-                    if (service_table[s].cap == CAP_DIAG)
+                    // Output service value if available, else true
+                    if (strcmp(service_table[s].name, "diagnostics") == 0)
                     {
                         int err = ctx->p_msg->payload.data[0].datafields.service.diagnostics.error_code;
-                        offset += snprintf(json + offset, json_size - offset,
-                                           "\"diagnostics\":%d", err);
+                        offset += snprintf(json + offset, json_size - offset, "\"%s\":%d", service_table[s].name, err);
                     }
-                    else if (service_table[s].cap == CAP_OTA)
+                    else if (strcmp(service_table[s].name, "ota") == 0)
                     {
                         const char *msg = ctx->p_msg->payload.data[0].datafields.service.ota_status.message;
-                        offset += snprintf(json + offset, json_size - offset,
-                                           "\"ota\":\"%s\"", msg ? msg : "");
+                        offset += snprintf(json + offset, json_size - offset, "\"%s\":\"%s\"", service_table[s].name, msg ? msg : "");
+                    }
+                    else
+                    {
+                        offset += snprintf(json + offset, json_size - offset, "\"%s\":true", service_table[s].name);
                     }
                 }
             }
-
             offset += snprintf(json + offset, json_size - offset, "}}");
         }
     }

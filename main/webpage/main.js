@@ -15,6 +15,22 @@ window.addEventListener('DOMContentLoaded', function () {
     setInterval(updateFooter, 1000);
 });
 
+// Persistence helpers for last seen/uptime across reloads
+function loadPersistedState() {
+    try {
+        const nt = localStorage.getItem('nodeTimes');
+        const kn = localStorage.getItem('knownNodes');
+        if (nt && !window.nodeTimes) window.nodeTimes = JSON.parse(nt);
+        if (kn && !window.knownNodes) window.knownNodes = JSON.parse(kn);
+    } catch (_) { /* ignore */ }
+}
+function savePersistedState() {
+    try {
+        if (window.nodeTimes) localStorage.setItem('nodeTimes', JSON.stringify(window.nodeTimes));
+        if (window.knownNodes) localStorage.setItem('knownNodes', JSON.stringify(window.knownNodes));
+    } catch (_) { /* ignore */ }
+}
+
 function fetchDistance() {
     fetch('/distance').then(r => r.json()).then(j => {
         document.getElementById('distance').textContent = j.distance + ' cm';
@@ -63,40 +79,121 @@ function fetchStats() {
 function fetchNodes() {
     const panel = document.getElementById('nodesPanel');
     if (!panel) return;
+    // Load any persisted state once
+    loadPersistedState();
     fetch('/nodeslist')
         .then(r => r.json())
         .then(nodes => {
-            if (!Array.isArray(nodes) || nodes.length === 0) {
+            // Ensure state holders exist
+            if (!window.nodeTimes) window.nodeTimes = {};
+            if (!window.knownNodes) window.knownNodes = {};
+
+            const nowTs = Date.now();
+            const presentIds = new Set();
+
+            const STALE_MS = 10000; // consider node offline if no data progress for 10s
+
+            if (Array.isArray(nodes)) {
+                nodes.forEach(node => {
+                    presentIds.add(node.id);
+                    // Update last seen/uptime while online
+                    const nt = window.nodeTimes[node.id] || {};
+                    if (!nt.firstSeen) nt.firstSeen = nowTs;
+                    nt.lastOnline = nowTs;
+                    // Track uptime changes to detect staleness
+                    if (typeof node.uptime_s === 'number') {
+                        if (nt.lastUptime !== node.uptime_s) {
+                            nt.lastUptime = node.uptime_s;
+                            nt.lastDataTs = nowTs; // data progressed
+                            if (nt.offlineSince) delete nt.offlineSince; // back online
+                        } else if (!nt.lastDataTs) {
+                            // initialize once
+                            nt.lastDataTs = nowTs;
+                        }
+                    }
+                    // Node is online again; clear any prior offline marker
+                    if (nt.offlineSince) delete nt.offlineSince;
+                    window.nodeTimes[node.id] = nt;
+                    // Remember the latest payload for rendering
+                    window.knownNodes[node.id] = { ...node };
+                });
+            }
+
+            // Build combined list: online first (from current fetch), then offline (previously known but missing)
+            const combined = [];
+            if (Array.isArray(nodes)) combined.push(...nodes);
+            for (const idStr of Object.keys(window.knownNodes)) {
+                const id = parseInt(idStr, 10);
+                if (!presentIds.has(id)) {
+                    const last = window.knownNodes[id];
+                    // Create a shallow copy and mark offline
+                    // Set offlineSince once
+                    const nt = window.nodeTimes[id] || {};
+                    if (!nt.offlineSince) nt.offlineSince = nowTs;
+                    window.nodeTimes[id] = nt;
+                    // Important: spread last first, then override with Offline fields
+                    combined.push({ ...last, id, status: 'Offline', uptime_s: 0 });
+                }
+            }
+
+            if (combined.length === 0) {
+                // Nothing ever seen
                 panel.textContent = 'No nodes connected.';
                 return;
             }
+
+            // Render
             let html = '';
-            nodes.forEach(node => {
-                // Icons: thermometer, droplet, battery
-                const tempIcon = '<span style="font-size:1.2em">🌡️</span>';
-                const humidIcon = '<span style="font-size:1.2em">💧</span>';
-                const battIcon = '<span style="font-size:1.2em">🔋</span>';
-                let online = node.status === 'Online';
-                let cardClass = online ? 'node-card' : 'node-card offline';
-                let uptime = node.uptime_s ? formatUptime(node.uptime_s) : '-';
-                let lastSeen = node.last_seen ? formatDateTime(node.last_seen) : '-';
+            const tempIcon = '<span style="font-size:1.2em">🌡️</span>';
+            const humidIcon = '<span style="font-size:1.2em">💧</span>';
+            const battIcon = '<span style="font-size:1.2em">🔋</span>';
+            const moistIcon = '<span style="font-size:1.2em">🪴</span>';
+
+            // Online first, then by id ascending
+            combined.sort((a, b) => {
+                const aOnline = a.status === 'Online';
+                const bOnline = b.status === 'Online';
+                if (aOnline !== bOnline) return aOnline ? -1 : 1;
+                return (a.id || 0) - (b.id || 0);
+            });
+            combined.forEach(node => {
+                const nt = window.nodeTimes[node.id] || {};
+                const isStale = nt.lastDataTs ? (nowTs - nt.lastDataTs) > STALE_MS : false;
+                const isPresent = presentIds.has(node.id);
+                // Only treat as online if the node is present in the latest payload and not stale
+                const online = isPresent && (node.status === 'Online') && !isStale;
+                const cardClass = online ? 'node-card' : 'node-card offline';
+                const uptime = online && node.uptime_s ? formatUptime(node.uptime_s) : '-';
+                // Set offlineSince when we first notice staleness for present nodes
+                if (!online && !nt.offlineSince) {
+                    nt.offlineSince = nt.lastDataTs || nt.lastOnline || nowTs;
+                    window.nodeTimes[node.id] = nt;
+                }
+                const lastSeenTs = nt.offlineSince || nt.lastDataTs || nt.lastOnline;
+                const lastSeen = !online && lastSeenTs ? formatDateTime(lastSeenTs) : '-';
+                const lastUptime = !online && nt.lastUptime ? formatUptime(nt.lastUptime) : '-';
+
                 html += `<div class='${cardClass}'>`;
-                html += `<div class='node-title'>Node: <span class='node-id'>${node.id || '-'}</span></div>`;
+                html += `<div class='node-title'>Node: <span class='node-id'>${node.id ?? '-'}</span></div>`;
                 html += `<div class='node-info'>`;
-                html += `${tempIcon} ${node.temp !== undefined ? node.temp + '°C' : '-'} &nbsp;`;
-                html += `${humidIcon} ${node.humid !== undefined ? node.humid + '%' : '-'} &nbsp;`;
-                html += `${battIcon} ${node.batt !== undefined ? node.batt + 'V' : '-'} &nbsp;`;
+                // Use backend field names: temperature, humidity, moisture
+                html += `${tempIcon} ${node.temperature !== undefined && node.temperature !== null ? node.temperature + '°C' : '-'} &nbsp;`;
+                html += `${humidIcon} ${node.humidity !== undefined && node.humidity !== null ? node.humidity + '%' : '-'} &nbsp;`;
+                html += `${battIcon} ${node.battery !== undefined ? node.battery + 'V' : (node.batt !== undefined ? node.batt + 'V' : '-')} &nbsp;`;
+                html += `${moistIcon} ${node.moisture !== undefined && node.moisture !== null ? node.moisture + '' : '-'} &nbsp;`;
                 html += `${online ? '<span class="node-status online">Online</span>' : '<span class="node-status offline">Offline</span>'}`;
                 html += `</div>`;
                 if (online) {
                     html += `<div class='node-uptime'>Uptime: ${uptime}</div>`;
                 } else {
                     html += `<div class='node-lastseen'>Offline since: <span style='color:#d32f2f'>${lastSeen}</span></div>`;
-                    html += `<div class='node-uptime'>Last Uptime: ${uptime}</div>`;
+                    html += `<div class='node-uptime'>Last Uptime: ${lastUptime}</div>`;
                 }
                 html += `</div>`;
             });
             panel.innerHTML = html;
+            // Persist updates
+            savePersistedState();
         })
         .catch(() => {
             panel.textContent = 'Failed to load node data.';

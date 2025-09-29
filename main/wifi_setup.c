@@ -315,8 +315,8 @@ esp_err_t wifi_setup(void)
     {
         // return wifi_setup_ap_mode();
         // Temporarily use default credentials for testing
-        const char *default_ssid = "xx";
-        const char *default_password = "xx";
+        const char *default_ssid = "TheDecoRated";
+        const char *default_password = "N0freeloading";
         strncpy((char *)wifi_config.sta.ssid, default_ssid, sizeof(wifi_config.sta.ssid));
         strncpy((char *)wifi_config.sta.password, default_password, sizeof(wifi_config.sta.password));
         wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;

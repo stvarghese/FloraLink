@@ -51,8 +51,8 @@ static esp_err_t stats_get_handler(httpd_req_t *req)
     char accept_hdr[64] = {0};
     if (httpd_req_get_hdr_value_str(req, "Accept", accept_hdr, sizeof(accept_hdr)) == ESP_OK && strstr(accept_hdr, "text/html"))
     {
-        httpd_resp_set_type(req, "text/html");
-        SEND_HTML_CHUNK("<!DOCTYPE html><html><head><title>Device Stats</title><meta name='viewport' content='width=device-width,initial-scale=1'>");
+        httpd_resp_set_type(req, "text/html; charset=utf-8");
+        SEND_HTML_CHUNK("<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Device Stats</title><meta name='viewport' content='width=device-width,initial-scale=1'>");
         SEND_HTML_CHUNK("<link rel='stylesheet' href='/main.css'>");
         SEND_HTML_CHUNK("<script src='/main.js'></script>");
         SEND_HTML_CHUNK("</head><body><div class='container'>");
@@ -91,8 +91,8 @@ static esp_err_t stats_get_handler(httpd_req_t *req)
 /* HTTP GET handler for /configure */
 static esp_err_t configure_get_handler(httpd_req_t *req)
 {
-    httpd_resp_set_type(req, "text/html");
-    SEND_HTML_CHUNK("<!DOCTYPE html><html><head><title>Configure</title><meta name='viewport' content='width=device-width,initial-scale=1'>");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    SEND_HTML_CHUNK("<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Configure</title><meta name='viewport' content='width=device-width,initial-scale=1'>");
     SEND_HTML_CHUNK("<link rel='stylesheet' href='/main.css'>");
     SEND_HTML_CHUNK("<script src='/main.js'></script>");
     SEND_HTML_CHUNK("</head><body><div class='container'>");
@@ -123,8 +123,8 @@ static esp_err_t configure_get_handler(httpd_req_t *req)
 // HTTP GET handler for /nodes
 static esp_err_t nodes_get_handler(httpd_req_t *req)
 {
-    httpd_resp_set_type(req, "text/html");
-    SEND_HTML_CHUNK("<!DOCTYPE html><html><head><title>Nodes</title><meta name='viewport' content='width=device-width,initial-scale=1'>");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    SEND_HTML_CHUNK("<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Nodes</title><meta name='viewport' content='width=device-width,initial-scale=1'>");
     SEND_HTML_CHUNK("<link rel='stylesheet' href='/main.css'>");
     SEND_HTML_CHUNK("<script src='/main.js'></script>");
     SEND_HTML_CHUNK("</head><body><div class='container'>");
@@ -171,7 +171,7 @@ static esp_err_t configure_post_handler(httpd_req_t *req)
             blink_set_period_ms(period);
         }
     }
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_sendstr(req, "<html><body><script>window.location='/configure';</script></body></html>");
     return ESP_OK;
 }
@@ -198,10 +198,10 @@ static esp_err_t index_get_handler(httpd_req_t *req)
 {
     const char *ssid = wifi_get_ssid();
     ESP_LOGI("WebServer", "SSID for HTML injection: '%s'", ssid ? ssid : "(null)");
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
 
     // Send static HTML in flash-resident chunks (saves needing a 4KB RAM buffer)
-    SEND_HTML_CHUNK("<!DOCTYPE html><html><head><title>FloraLink.Hub</title>");
+    SEND_HTML_CHUNK("<!DOCTYPE html><html><head><meta charset='UTF-8'><title>FloraLink.Hub</title>");
     SEND_HTML_CHUNK("<meta name='viewport' content='width=device-width,initial-scale=1'>");
     SEND_HTML_CHUNK("<link rel='stylesheet' href='/main.css'>");
     // Inject SSID JS variable before main.js

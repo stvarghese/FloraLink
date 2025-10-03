@@ -10,11 +10,18 @@
 #include <esp_http_server.h>
 #include "monitor.h"
 #include "nodeio.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <esp_timer.h>
+#include <esp_heap_caps.h>
 
 extern const unsigned char webpage_main_css_start[] asm("_binary_main_css_start");
 extern const unsigned char webpage_main_css_end[] asm("_binary_main_css_end");
 extern const unsigned char webpage_main_js_start[] asm("_binary_main_js_start");
 extern const unsigned char webpage_main_js_end[] asm("_binary_main_js_end");
+
+// Static declarations
+static void webserver_health_monitor_task(void *pvParameters);
 
 // HTTP GET handler for /nodeslist
 static esp_err_t nodeslist_get_handler(httpd_req_t *req)
@@ -285,6 +292,15 @@ esp_err_t webserver_init(void)
     // increase number of uri hanlers
     config_http.max_uri_handlers = 12;
 
+    // Fix timeout issues - increase timeouts and enable keep-alive
+    config_http.recv_wait_timeout = 60;   // 60 seconds instead of 5
+    config_http.send_wait_timeout = 60;   // 60 seconds instead of 5
+    config_http.keep_alive_enable = true; // Enable TCP keep-alive
+    config_http.keep_alive_idle = 120;    // Keep-alive idle time: 2 minutes
+    config_http.keep_alive_interval = 30; // Keep-alive interval: 30 seconds
+    config_http.keep_alive_count = 3;     // Keep-alive retry count
+    config_http.lru_purge_enable = true;  // Enable LRU purge to handle stale connections
+
     // --- Define URI handlers ---
     // HTML pages
     httpd_uri_t index_uri = {
@@ -368,5 +384,116 @@ esp_err_t webserver_init(void)
         ESP_LOGE(TAG, "Failed to start WebSocket server");
     }
     ESP_LOGI(TAG, "Web server started on port %d", config_http.server_port);
+
+    // Start server health monitoring task
+    xTaskCreate(webserver_health_monitor_task, "webserver_health", 2048, NULL, 1, NULL);
+
     return ret;
+}
+
+/* Server health monitoring task */
+static void webserver_health_monitor_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Server health monitor started");
+    const TickType_t check_interval = pdMS_TO_TICKS(30000); // Check every 30 seconds
+
+    while (1)
+    {
+        vTaskDelay(check_interval);
+
+        // Check if server handle is still valid
+        if (server == NULL)
+        {
+            ESP_LOGE(TAG, "Server handle is NULL - server may have crashed!");
+            // Attempt restart - could implement restart logic here
+            continue;
+        }
+
+        // Get detailed server status information
+        size_t open_fds = 0;
+
+        // Get number of active client connections
+        // We need to provide a temporary array to get the count
+        int temp_fds[20];     // Temporary array (should be >= max_open_sockets)
+        size_t fd_count = 20; // Maximum we can handle
+        esp_err_t fd_result = httpd_get_client_list(server, &fd_count, temp_fds);
+        if (fd_result == ESP_OK)
+        {
+            open_fds = fd_count; // fd_count now contains actual number of connections
+        }
+
+        // Get global user context (can be used to check server state)
+        void *global_ctx = httpd_get_global_user_ctx(server);
+
+        // Get transport context
+        void *transport_ctx = httpd_get_global_transport_ctx(server);
+
+        // Log comprehensive health status periodically
+        static int health_counter = 0;
+        if (++health_counter >= 20)
+        { // Log every 10 minutes (20 * 30 seconds)
+            ESP_LOGI(TAG, "Server health check: OK");
+            ESP_LOGI(TAG, "  - Uptime: %llu ms", esp_timer_get_time() / 1000);
+            ESP_LOGI(TAG, "  - Active client connections: %zu", open_fds);
+            ESP_LOGI(TAG, "  - Global context: %s", global_ctx ? "set" : "null");
+            ESP_LOGI(TAG, "  - Transport context: %s", transport_ctx ? "set" : "null");
+
+            // Get memory info
+            size_t free_heap = esp_get_free_heap_size();
+            size_t min_free_heap = esp_get_minimum_free_heap_size();
+            ESP_LOGI(TAG, "  - Free heap: %zu bytes (min: %zu bytes)", free_heap, min_free_heap);
+
+            health_counter = 0;
+        }
+
+        // Quick health checks every 30 seconds
+        if (open_fds > 10) // Warn if too many open connections
+        {
+            ESP_LOGW(TAG, "High number of open connections: %zu", open_fds);
+        }
+
+        // Enhanced memory leak detection
+        static size_t previous_free_heap = 0;
+        static int low_heap_count = 0;
+        static int leak_detection_count = 0;
+
+        size_t current_free_heap = esp_get_free_heap_size();
+
+        // Memory leak detection - compare with previous measurement
+        if (previous_free_heap > 0 && current_free_heap < previous_free_heap)
+        {
+            size_t heap_drop = previous_free_heap - current_free_heap;
+            if (heap_drop > 1000) // Significant drop (>1KB in 30 seconds)
+            {
+                ESP_LOGW(TAG, "Memory leak detected: dropped %zu bytes in 30s (from %zu to %zu)",
+                         heap_drop, previous_free_heap, current_free_heap);
+                leak_detection_count++;
+            }
+        }
+
+        // Progressive heap warnings
+        if (current_free_heap < 100000) // First warning at 100KB
+        {
+            ESP_LOGW(TAG, "Low heap warning: %zu bytes remaining", current_free_heap);
+            low_heap_count++;
+        }
+        if (current_free_heap < 50000) // Critical warning at 50KB
+        {
+            ESP_LOGE(TAG, "CRITICAL heap warning: %zu bytes remaining", current_free_heap);
+        }
+        if (current_free_heap < 10000) // Emergency at 10KB
+        {
+            ESP_LOGE(TAG, "EMERGENCY: Only %zu bytes heap remaining - system may crash!", current_free_heap);
+            // Could trigger emergency cleanup or restart here
+        }
+
+        // Log leak statistics periodically
+        if (leak_detection_count > 0 && (health_counter % 10) == 0)
+        {
+            ESP_LOGE(TAG, "Memory leak summary: %d leaks detected, %d low heap warnings",
+                     leak_detection_count, low_heap_count);
+        }
+
+        previous_free_heap = current_free_heap;
+    }
 }

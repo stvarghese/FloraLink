@@ -427,6 +427,13 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
     node_params_t **const pp_node = &node_contexts[node_id].p_node;
     wss_session_t **const pp_session = &node_contexts[node_id].p_session;
 
+    // Free any existing message for this node before allocating new one
+    if (node_contexts[node_id].p_msg != NULL)
+    {
+        free(node_contexts[node_id].p_msg);
+        node_contexts[node_id].p_msg = NULL;
+    }
+
     // Allocate a new protocol_msg_t for this message
     protocol_msg_t *p_currentmsg = calloc(1, sizeof(protocol_msg_t));
     if (!p_currentmsg)
@@ -524,6 +531,10 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
 
     // 4. Optionally, send a response or command back to this node
     //    websockserver_send(client_fd, response, strlen(response));
+
+    // Note: p_currentmsg is now stored in node_contexts[node_id].p_msg and will be:
+    // - Replaced when the next message from this node arrives
+    // - Freed when the node disconnects in nodeio_handle_disconnect()
 }
 
 static void nodeio_send_response(int client_fd, const char *response, size_t len)
@@ -889,21 +900,21 @@ void nodeio_monitor_nodeslist(void)
                     if (node_contexts[i].p_msg->payload.data[j].current_cap_mask & sensor_table[s].cap)
                     {
                         float *pval = (float *)((uint8_t *)&node_contexts[i].p_msg->payload.data[j].datafields.sensor + sensor_table[s].offset);
-                        ESP_LOGI(TAG, "Node %d sensor payload: %s: %.2f", i, sensor_table[s].name, *pval);
+                        // ESP_LOGI(TAG, "Node %d sensor payload: %s: %.2f", i, sensor_table[s].name, *pval);
                     }
                 }
                 // Print each service diag or ota value if present
                 if (node_contexts[i].p_msg->payload.data[j].current_cap_mask & CAP_DIAG)
                 {
-                    ESP_LOGI(TAG, "Node %d service payload: Diag: %d", i, node_contexts[i].p_msg->payload.data[j].datafields.service.diagnostics.error_code);
+                    // ESP_LOGI(TAG, "Node %d service payload: Diag: %d", i, node_contexts[i].p_msg->payload.data[j].datafields.service.diagnostics.error_code);
                 }
                 if (node_contexts[i].p_msg->payload.data[j].current_cap_mask & CAP_OTA)
                 {
-                    ESP_LOGI(TAG, "Node %d service payload: OTA: %s", i, node_contexts[i].p_msg->payload.data[j].datafields.service.ota_status.message);
+                    // ESP_LOGI(TAG, "Node %d service payload: OTA: %s", i, node_contexts[i].p_msg->payload.data[j].datafields.service.ota_status.message);
                 }
             }
             // Log if node is online
-            ESP_LOGI(TAG, "Node %d is online", i);
+            // ESP_LOGI(TAG, "Node %d is online", i);
             // Update and log node uptime
             if (node_contexts[i].node_uptime_start != 0)
             {
@@ -932,7 +943,7 @@ void nodeio_monitor_nodeslist(void)
         }
     }
 
-    ESP_LOGI(TAG, "-----------------------------------");
+    // ESP_LOGI(TAG, "-----------------------------------");
 }
 
 size_t nodeio_publish_nodeslist(char *json, size_t json_size)

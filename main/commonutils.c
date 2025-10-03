@@ -2,6 +2,49 @@
 #include <ctype.h>
 #include "commonutils.h"
 #include <string.h>
+// #include "esp_heap_caps.h"
+#include "esp_system.h"
+
+#if HEAP_TRACING_ENABLED
+#include "esp_log.h"
+
+heap_trace_context_t heap_trace_start(const char *tag, const char *function)
+{
+    heap_trace_context_t ctx;
+    ctx.heap_before = esp_get_free_heap_size();
+    ctx.tag = tag;
+    ctx.function = function;
+
+    ESP_LOGD(tag, "[%s] Heap before %s: %zu", tag, function, ctx.heap_before);
+    return ctx;
+}
+
+void heap_trace_end(heap_trace_context_t *ctx, size_t leak_threshold)
+{
+    if (!ctx || !ctx->tag || !ctx->function)
+        return;
+
+    size_t heap_after = esp_get_free_heap_size();
+    ssize_t delta = (ssize_t)heap_after - (ssize_t)ctx->heap_before;
+
+    ESP_LOGD(ctx->tag, "[%s] Heap after %s: %zu (delta: %zd)",
+             ctx->tag, ctx->function, heap_after, delta);
+
+    if (ctx->heap_before > heap_after)
+    {
+        size_t leaked = ctx->heap_before - heap_after;
+        if (leaked > leak_threshold)
+        {
+            ESP_LOGW(ctx->tag, "Memory leak detected in %s: %u bytes (before: %u, after: %u)",
+                     ctx->function, leaked, (unsigned)ctx->heap_before, (unsigned)heap_after);
+        }
+        else if (leaked > 0)
+        {
+            ESP_LOGD(ctx->tag, "Small allocation in %s: %u bytes", ctx->function, leaked);
+        }
+    }
+}
+#endif
 
 void anonymize_string(char *str, uint8_t pos, size_t len)
 {

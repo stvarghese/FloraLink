@@ -4,6 +4,7 @@
 #include "webserver.h"
 #include "websockserver.h"
 #include "wifi_setup.h"
+#include "commonutils.h"
 #include <stdio.h>
 #include <string.h>
 #include <esp_log.h>
@@ -13,7 +14,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_timer.h>
-#include <esp_heap_caps.h>
+// #include <esp_heap_caps.h>
 
 extern const unsigned char webpage_main_css_start[] asm("_binary_main_css_start");
 extern const unsigned char webpage_main_css_end[] asm("_binary_main_css_end");
@@ -26,16 +27,23 @@ static void webserver_health_monitor_task(void *pvParameters);
 // HTTP GET handler for /nodeslist
 static esp_err_t nodeslist_get_handler(httpd_req_t *req)
 {
+    HEAP_TRACE_START("NODESLIST");
+
     char *json = (char *)malloc(2048);
     if (!json)
     {
         httpd_resp_send_500(req);
+        HEAP_TRACE_END_DEFAULT();
         return ESP_FAIL;
     }
     nodeio_publish_nodeslist(json, 2048);
+    // Explicitly instruct the client this connection will be closed
+    httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
     free(json);
+
+    HEAP_TRACE_END(100); // Higher threshold for HTTP response processing
     return ESP_OK;
 }
 
@@ -293,13 +301,15 @@ esp_err_t webserver_init(void)
     config_http.max_uri_handlers = 12;
 
     // Fix timeout issues - increase timeouts and enable keep-alive
-    config_http.recv_wait_timeout = 60;   // 60 seconds instead of 5
-    config_http.send_wait_timeout = 60;   // 60 seconds instead of 5
-    config_http.keep_alive_enable = true; // Enable TCP keep-alive
-    config_http.keep_alive_idle = 120;    // Keep-alive idle time: 2 minutes
-    config_http.keep_alive_interval = 30; // Keep-alive interval: 30 seconds
-    config_http.keep_alive_count = 3;     // Keep-alive retry count
-    config_http.lru_purge_enable = true;  // Enable LRU purge to handle stale connections
+    config_http.recv_wait_timeout = 60; // 60 seconds instead of 5
+    config_http.send_wait_timeout = 60; // 60 seconds instead of 5
+    // Disable HTTP keep-alive to avoid per-connection memory lingering
+    config_http.keep_alive_enable = false;
+    // The following are ignored when keep-alive is disabled; left here for quick re-enable if needed
+    // config_http.keep_alive_idle = 120;    // Keep-alive idle time: 2 minutes
+    // config_http.keep_alive_interval = 30; // Keep-alive interval: 30 seconds
+    // config_http.keep_alive_count = 3;     // Keep-alive retry count
+    config_http.lru_purge_enable = true; // Enable LRU purge to handle stale connections
 
     // --- Define URI handlers ---
     // HTML pages
@@ -401,6 +411,8 @@ static void webserver_health_monitor_task(void *pvParameters)
     {
         vTaskDelay(check_interval);
 
+        HEAP_TRACE_START("HEALTH_MONITOR");
+
         // Check if server handle is still valid
         if (server == NULL)
         {
@@ -463,7 +475,7 @@ static void webserver_health_monitor_task(void *pvParameters)
         if (previous_free_heap > 0 && current_free_heap < previous_free_heap)
         {
             size_t heap_drop = previous_free_heap - current_free_heap;
-            if (heap_drop > 1000) // Significant drop (>1KB in 30 seconds)
+            if (heap_drop > 128) // Significant drop (>128 bytes in 30 seconds)
             {
                 ESP_LOGW(TAG, "Memory leak detected: dropped %zu bytes in 30s (from %zu to %zu)",
                          heap_drop, previous_free_heap, current_free_heap);
@@ -495,5 +507,7 @@ static void webserver_health_monitor_task(void *pvParameters)
         }
 
         previous_free_heap = current_free_heap;
+
+        HEAP_TRACE_END_DEFAULT();
     }
 }

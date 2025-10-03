@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "nodeioprotocol.h"
 #include "cJSON.h"
+#include "commonutils.h"
 #include <time.h>
 
 // Maximum num of nodes shall be equal to the maximum number of sessions
@@ -109,6 +110,8 @@ static const type_map_t msg_type_map[] = {
 
 void nodeio_active_nodes_ping(void)
 {
+    HEAP_TRACE_START("PING");
+
     for (int i = 0; i < MAX_NODES; ++i)
     {
         if (node_contexts[i].p_node && node_contexts[i].p_session && node_contexts[i].p_session->connected)
@@ -121,6 +124,8 @@ void nodeio_active_nodes_ping(void)
             }
         }
     }
+
+    HEAP_TRACE_END_TIMER(); // Ping allocates WebSocket frames and timers, higher threshold expected
 }
 
 static inline msg_type_t nodeio_type_str_to_enum(const char *type_str)
@@ -191,9 +196,12 @@ static inline capability_t nodeio_build_node_capmask_services(cJSON *services_ar
 // Helper to update node parameters from JSON
 static inline node_params_t *nodeio_update_node_params_from_json(uint8_t node_id, cJSON *root)
 {
+    HEAP_TRACE_START("UPDATE_PARAMS");
+
     if (!root)
     {
         ESP_LOGE(TAG, "Invalid JSON root");
+        HEAP_TRACE_END_DEFAULT();
         return NULL;
     }
     // Only single pointer needed because we're just updating the structure fields
@@ -217,12 +225,16 @@ static inline node_params_t *nodeio_update_node_params_from_json(uint8_t node_id
         strncpy(node->sw_version, sw_version_item->valuestring, sizeof(node->sw_version) - 1);
         node->sw_version[sizeof(node->sw_version) - 1] = '\0';
     }
+
+    HEAP_TRACE_END_DEFAULT();
     return node;
 }
 
 // Helper function to parse payload from JSON
 static inline esp_err_t nodeio_parse_message_payload(cJSON *root, capability_t node_cap_mask, protocol_msg_t *p_currentmsg)
 {
+    HEAP_TRACE_START("PARSE_PAYLOAD");
+
     // Check pointers
     if (!root || !p_currentmsg)
     {
@@ -332,18 +344,24 @@ static inline esp_err_t nodeio_parse_message_payload(cJSON *root, capability_t n
                 }
             }
         }
+
+        HEAP_TRACE_END_DEFAULT();
         return ESP_OK;
     }
     else
     {
         ESP_LOGW(TAG, "No payload array found in message");
+
+        HEAP_TRACE_END_DEFAULT();
         return ESP_FAIL;
     }
 }
 
 static void nodeio_handle_message(int client_fd, const char *data, size_t len)
 {
+    HEAP_TRACE_START("NODEIO");
     bool is_valid = false;
+
     // ESP_LOGD(TAG, "Received message: %s, length: %u", data, len);
     // // 1. Copy and null-terminate the data
     // char msg[512];
@@ -535,6 +553,8 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
     // Note: p_currentmsg is now stored in node_contexts[node_id].p_msg and will be:
     // - Replaced when the next message from this node arrives
     // - Freed when the node disconnects in nodeio_handle_disconnect()
+
+    HEAP_TRACE_END(100); // Use higher threshold for message handling
 }
 
 static void nodeio_send_response(int client_fd, const char *response, size_t len)
@@ -557,6 +577,8 @@ static void nodeio_broadcast(const char *message, size_t len)
 
 static void nodeio_subscribe_to_node(int node_id, const subscribe_config_t *config)
 {
+    HEAP_TRACE_START("SUBSCRIBE");
+
     int client_fd = websockserver_session_find_fd(node_id);
     // Find the node context associated with this client_fd
     if (node_id < 0 || node_id >= MAX_NODES)
@@ -637,6 +659,8 @@ static void nodeio_subscribe_to_node(int node_id, const subscribe_config_t *conf
 
             node_contexts[node_id].subscription_update = false; // Reset the update flag
             cJSON_Delete(root);
+
+            HEAP_TRACE_END_DEFAULT();
             return;
         }
         else
@@ -648,6 +672,8 @@ static void nodeio_subscribe_to_node(int node_id, const subscribe_config_t *conf
     {
         ESP_LOGW(TAG, "Subscribe: client_fd %d not found, node id: %d", client_fd, node_id);
     }
+
+    HEAP_TRACE_END_DEFAULT();
     // check which parameter is causing the issue
     // if (!node_contexts[node_id].p_session)
     // {
@@ -661,6 +687,8 @@ static void nodeio_subscribe_to_node(int node_id, const subscribe_config_t *conf
 
 void nodeio_process_subscription_updates(void)
 {
+    HEAP_TRACE_START("SUB_UPDATES");
+
     for (int i = 0; i < MAX_NODES; ++i)
     {
         // check if a node exists on this index
@@ -678,10 +706,14 @@ void nodeio_process_subscription_updates(void)
         // ESP_LOGI(TAG, "Processing subscription update for node id: %d", i);
         nodeio_subscribe_to_node(node_contexts[i].p_node->node_id, &sub_config);
     }
+
+    HEAP_TRACE_END_DEFAULT();
 }
 
 static void nodeio_unsubscribe_from_node(int client_fd)
 {
+    HEAP_TRACE_START("UNSUBSCRIBE");
+
     for (int i = 0; i < MAX_NODES; ++i)
     {
         if (node_contexts[i].p_session && node_contexts[i].p_session->client_fd == client_fd)
@@ -705,10 +737,14 @@ static void nodeio_unsubscribe_from_node(int client_fd)
                 cJSON_free(msg);
             }
             cJSON_Delete(root);
+
+            HEAP_TRACE_END_DEFAULT();
             return;
         }
     }
     ESP_LOGW(TAG, "Unsubscribe: client_fd %d not found", client_fd);
+
+    HEAP_TRACE_END_DEFAULT();
 }
 
 static void nodeio_request_ota(int client_fd, const ota_request_t *ota)
@@ -762,6 +798,8 @@ static void nodeio_request_diagnostic(int client_fd)
 
 static void nodeio_handle_disconnect(int client_fd, uint8_t node_id)
 {
+    HEAP_TRACE_START("DISCONNECT");
+
     ESP_LOGD(TAG, "Node %d disconnect request", node_id);
     // Purge node context, free allocated memories (node and msg)
     node_params_t *p_node = node_contexts[node_id].p_node;
@@ -789,10 +827,14 @@ static void nodeio_handle_disconnect(int client_fd, uint8_t node_id)
     nodeio_unsubscribe_from_node(client_fd);
     websockserver_session_remove(client_fd);
     ESP_LOGI(TAG, "Node %d disconnected", node_id);
+
+    HEAP_TRACE_END_DEFAULT();
 }
 
 static node_params_t *nodeio_handle_connect(int client_fd, uint8_t node_id, cJSON *root)
 {
+    HEAP_TRACE_START("CONNECT");
+
     // Handle new client connection
     // local pointer to node_params_t*
     node_params_t **pp_node_to_connect = &node_contexts[node_id].p_node;
@@ -820,6 +862,9 @@ static node_params_t *nodeio_handle_connect(int client_fd, uint8_t node_id, cJSO
     // websockserver updates it own session array, hence returning the pointer to the updated session array element
     node_contexts[node_id].p_session = websockserver_session_update(client_fd, node_id);
     ESP_LOGD(TAG, "Node %d connected with client FD: %d", node_id, client_fd);
+
+    HEAP_TRACE_END_DEFAULT();
+
     return *pp_node_to_connect;
 }
 
@@ -845,6 +890,8 @@ static void nodeio_handle_heartbeat(int client_fd)
 // Websocket server close callback
 static void nodeio_on_close(int client_fd)
 {
+    HEAP_TRACE_START("ON_CLOSE");
+
     ESP_LOGD(TAG, "WebSocket client_fd %d on close callback", client_fd);
     // find node_id from client_fd
     int node_id = 0;
@@ -858,19 +905,27 @@ static void nodeio_on_close(int client_fd)
 
     // Handle client disconnection
     nodeio_handle_disconnect(client_fd, (uint8_t)node_id);
+
+    HEAP_TRACE_END_DEFAULT();
 }
 
 // Nodeio WebSocket server receive callback
 static void nodeio_on_message(int client_fd, const char *data, size_t len)
 {
+    HEAP_TRACE_START("ON_MSG");
+
     // Handle incoming WebSocket messages
     nodeio_handle_message(client_fd, data, len);
     // TODO: Add any additional processing if needed
+
+    HEAP_TRACE_END_DEFAULT();
 }
 
 // Monitor total number of connected nodes
 void nodeio_monitor_nodeslist(void)
 {
+    HEAP_TRACE_START("MONITOR");
+
     static uint8_t prev_count = 0;
     uint8_t count = 0;
     for (int i = 0; i < MAX_NODES; i++)
@@ -944,10 +999,14 @@ void nodeio_monitor_nodeslist(void)
     }
 
     // ESP_LOGI(TAG, "-----------------------------------");
+
+    HEAP_TRACE_END_DEFAULT();
 }
 
 size_t nodeio_publish_nodeslist(char *json, size_t json_size)
 {
+    HEAP_TRACE_START("PUBLISH");
+
     int offset = 0;
     int node_count = 0;
 
@@ -1047,6 +1106,7 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
 
     // ESP_LOGI(TAG, "nodeio_publish_nodeslist: published %d nodes, JSON length: %d", node_count, offset);
 
+    HEAP_TRACE_END_DEFAULT();
     return offset;
 }
 

@@ -3,6 +3,58 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "esp_heap_caps.h"
+
+// Include heap tracing configuration
+#include "heap_tracing.h"
+
+// Heap tracing helpers (only active when HEAP_TRACING_ENABLED is 1)
+#if HEAP_TRACING_ENABLED
+
+typedef struct
+{
+    size_t heap_before;
+    const char *tag;
+    const char *function;
+} heap_trace_context_t;
+
+// Start heap tracing for a function
+heap_trace_context_t heap_trace_start(const char *tag, const char *function);
+
+// End heap tracing and check for significant changes
+void heap_trace_end(heap_trace_context_t *ctx, size_t leak_threshold);
+
+// Convenience macros for easy use
+#define HEAP_TRACE_START(tag) heap_trace_context_t _heap_ctx = heap_trace_start(tag, __FUNCTION__)
+#define HEAP_TRACE_END(threshold) heap_trace_end(&_heap_ctx, threshold)
+#define HEAP_TRACE_END_DEFAULT() heap_trace_end(&_heap_ctx, DEFAULT_HEAP_LEAK_THRESHOLD)
+#define HEAP_TRACE_END_TIMER() heap_trace_end(&_heap_ctx, TIMER_HEAP_LEAK_THRESHOLD)
+
+#else
+// When disabled, these become no-ops
+typedef struct
+{
+    int dummy;
+} heap_trace_context_t;
+#define HEAP_TRACE_START(tag) \
+    do                        \
+    {                         \
+        (void)(tag);          \
+    } while (0)
+#define HEAP_TRACE_END(threshold) \
+    do                            \
+    {                             \
+        (void)(threshold);        \
+    } while (0)
+#define HEAP_TRACE_END_DEFAULT() \
+    do                           \
+    {                            \
+    } while (0)
+#define HEAP_TRACE_END_TIMER() \
+    do                         \
+    {                          \
+    } while (0)
+#endif
 
 // Anonymize a string from position 'pos' for 'len' characters (replace with '*')
 void anonymize_string(char *str, uint8_t pos, size_t len);

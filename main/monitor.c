@@ -34,6 +34,7 @@
 
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "commonutils.h"
 
 static const char *TAG = "monitor";
 // Variables for RMT RX
@@ -61,6 +62,8 @@ void vApplicationIdleHook(void)
 // Call this periodically (e.g., from monitor_task or a timer)
 void monitor_update_cpu_load(void)
 {
+    HEAP_TRACE_START("CPU_LOAD");
+
     uint64_t now = esp_timer_get_time();
     uint64_t idle = s_idle_count;
     uint64_t dt = now - s_last_time;
@@ -107,6 +110,8 @@ void monitor_update_cpu_load(void)
     // ESP_LOGI(TAG, "CPU Load: %.2f%%", s_cpu_load * 100);
     s_last_time = now;
     s_last_idle_count = idle;
+
+    HEAP_TRACE_END_DEFAULT(); // CPU load calculation should not allocate memory
 }
 
 void monitor_get_device_stats(device_stats_t *stats)

@@ -1,5 +1,6 @@
 #include "websockserver.h"
 #include "esp_log.h"
+#include "commonutils.h"
 #include <string.h>
 
 // Define pong timeout in seconds
@@ -27,28 +28,45 @@ static wss_session_t wss_activesessions[MAX_SESSIONS];
 // Add or update a WebSocket session by session_id (array index)
 wss_session_t *websockserver_session_update(int client_fd, int session_id)
 {
+    HEAP_TRACE_START("SESSION_UPDATE");
+
     if (session_id >= MAX_SESSIONS)
         return NULL;
     wss_activesessions[session_id].client_fd = client_fd;
     wss_activesessions[session_id].connected = true;
     ESP_LOGI(TAG, "Session context updated for node: session_id=%d, client_fd=%d", session_id, client_fd);
+
+    HEAP_TRACE_END_DEFAULT();
     return &wss_activesessions[session_id];
 }
 
 // Remove a WebSocket session by client_fd, return pointer to session if found
 wss_session_t *websockserver_session_remove(int client_fd)
 {
+    HEAP_TRACE_START("SESSION_REMOVE");
+
     ESP_LOGI(TAG, "Removing WebSocket session: client_fd=%d", client_fd);
     for (int i = 0; i < MAX_SESSIONS; ++i)
     {
         if (wss_activesessions[i].connected && wss_activesessions[i].client_fd == client_fd)
         {
+            // Clean up any active timer to prevent memory leak
+            if (ws_pong_timers[i])
+            {
+                esp_timer_stop(ws_pong_timers[i]);
+                esp_timer_delete(ws_pong_timers[i]);
+                ws_pong_timers[i] = NULL;
+            }
+
             wss_activesessions[i].connected = false;
             wss_activesessions[i].client_fd = -1;
 
+            HEAP_TRACE_END_DEFAULT();
             return &wss_activesessions[i];
         }
     }
+
+    HEAP_TRACE_END_DEFAULT();
     return NULL;
 }
 
@@ -143,7 +161,9 @@ static esp_err_t ws_handler(httpd_req_t *req)
         {
             ((char *)ws_pkt.payload)[ws_pkt.len] = '\0';
             int client_fd = httpd_req_to_sockfd(req);
+            HEAP_TRACE_START("WS_RX");
             receive_callback(client_fd, (const char *)ws_pkt.payload, ws_pkt.len);
+            HEAP_TRACE_END_DEFAULT();
         }
         free(ws_pkt.payload);
     }
@@ -176,6 +196,8 @@ bool websockserver_init(httpd_handle_t server_handle)
 
 bool websockserver_send(int client_fd, const char *data, size_t len)
 {
+    HEAP_TRACE_START("WS_SEND");
+
     httpd_ws_frame_t ws_pkt = {
         .type = HTTPD_WS_TYPE_TEXT,
         .payload = (uint8_t *)data,
@@ -184,11 +206,17 @@ bool websockserver_send(int client_fd, const char *data, size_t len)
     // Use the server handle
     if (!ws_server_handle)
         return false;
-    return httpd_ws_send_frame_async(ws_server_handle, client_fd, &ws_pkt) == ESP_OK;
+
+    bool result = httpd_ws_send_frame_async(ws_server_handle, client_fd, &ws_pkt) == ESP_OK;
+
+    HEAP_TRACE_END_DEFAULT();
+    return result;
 }
 
 bool websockserver_ping(int client_fd)
 {
+    HEAP_TRACE_START("WS_PING");
+
     // Find session Id and check if valid
     int session_id = websockserver_session_find_sessid(client_fd);
     if (session_id == -1)
@@ -218,11 +246,16 @@ bool websockserver_ping(int client_fd)
     esp_timer_start_once(ws_pong_timers[session_id], WSS_PONG_TIMEOUT * 1000000);
     ws_active_pings[session_id] = true;
 
-    return httpd_ws_send_frame_async(ws_server_handle, client_fd, &ws_pkt) == ESP_OK;
+    bool result = httpd_ws_send_frame_async(ws_server_handle, client_fd, &ws_pkt) == ESP_OK;
+
+    HEAP_TRACE_END_TIMER(); // Timer allocation expected (~896 bytes), only warn on larger leaks
+    return result;
 }
 
 void websockserver_reset_pong_timer(int client_fd)
 {
+    HEAP_TRACE_START("RESET_PONG");
+
     // Find session Id and check if valid
     int session_id = websockserver_session_find_sessid(client_fd);
     if (session_id == -1)
@@ -231,7 +264,14 @@ void websockserver_reset_pong_timer(int client_fd)
         return;
     }
     ESP_LOGD(TAG, "Resetting pong timeout upon pong rx for client_fd=%d", client_fd);
-    esp_timer_stop(ws_pong_timers[session_id]);
+
+    // Stop and delete the timer to prevent memory leak
+    if (ws_pong_timers[session_id])
+    {
+        esp_timer_stop(ws_pong_timers[session_id]);
+        esp_timer_delete(ws_pong_timers[session_id]);
+        ws_pong_timers[session_id] = NULL;
+    }
     ws_active_pings[session_id] = false;
 
     // Record pong timestamp
@@ -243,10 +283,14 @@ void websockserver_reset_pong_timer(int client_fd)
         uint64_t latency_us = ws_pong_timestamps[session_id] - ws_ping_timestamps[session_id];
         ESP_LOGI(TAG, "Pong response time for client_fd=%d: %llf ms", client_fd, latency_us / 1000.0);
     }
+
+    HEAP_TRACE_END_DEFAULT();
 }
 
 void websockserver_pong_timeout_callback(void *arg)
 {
+    HEAP_TRACE_START("PONG_TIMEOUT");
+
     int client_fd = (int)arg;
     // websockserver_session_remove(client_fd);
     int session_id = websockserver_session_find_sessid(client_fd);
@@ -269,6 +313,8 @@ void websockserver_pong_timeout_callback(void *arg)
     {
         close_callback(client_fd);
     }
+
+    HEAP_TRACE_END_DEFAULT();
 }
 
 void websockserver_set_receive_callback(void (*callback)(int client_fd, const char *data, size_t len))

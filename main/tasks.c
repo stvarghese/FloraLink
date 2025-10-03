@@ -37,6 +37,7 @@
 #include "wifi_setup.h"
 #include "nodeio.h"
 #include "nvm.h"
+#include "commonutils.h"
 
 static const char *TAG = "FloraLink";
 
@@ -92,6 +93,8 @@ void monitor_task_1s(void *arg)
     ESP_LOGI(TAG, "monitor_task_1s started, on core %d", xPortGetCoreID());
     while (1)
     {
+        HEAP_TRACE_START("MONITOR_1S");
+
         // Update CPU load even if no RMT event
         monitor_update_cpu_load();
         nodeio_monitor_nodeslist();
@@ -103,6 +106,8 @@ void monitor_task_1s(void *arg)
             ping_counter = 0;
         }
         nodeio_process_subscription_updates();
+
+        HEAP_TRACE_END_TIMER(); // Monitor task includes ping operations which allocate memory
 
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
@@ -168,8 +173,21 @@ static void init_task(void *pvParameters)
         vTaskDelete(NULL);
     }
 
-    // esp_log_level_set("httpd_ws", ESP_LOG_DEBUG);
-    // esp_log_level_set("httpd_txrx", ESP_LOG_DEBUG);
+// esp_log_level_set("httpd_ws", ESP_LOG_DEBUG);
+// esp_log_level_set("httpd_txrx", ESP_LOG_DEBUG);
+#ifdef HEAP_TRACING_ENABLED
+    esp_log_level_set("PING", ESP_LOG_DEBUG);
+    esp_log_level_set("WS_PING", ESP_LOG_DEBUG);
+    esp_log_level_set("RESET_PONG", ESP_LOG_DEBUG);
+    esp_log_level_set("PONG_TIMEOUT", ESP_LOG_DEBUG);
+    esp_log_level_set("MONITOR_1S", ESP_LOG_DEBUG);
+    esp_log_level_set("HEALTH_MONITOR", ESP_LOG_DEBUG);
+    esp_log_level_set("WS_RX", ESP_LOG_DEBUG);
+    esp_log_level_set("WS_SEND", ESP_LOG_DEBUG);
+    esp_log_level_set("SESSION_UPDATE", ESP_LOG_DEBUG);
+    esp_log_level_set("SESSION_REMOVE", ESP_LOG_DEBUG);
+    esp_log_level_set("NODESLIST", ESP_LOG_DEBUG);
+#endif
     blink_init();
     monitor_init();
     gpiobutton_init(WIFI_RESET_PIN, wifi_reset_button_cb);

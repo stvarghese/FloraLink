@@ -10,6 +10,7 @@
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include "commonutils.h"
 
 #define DNS_PORT 53
 #define DNS_MAX_PACKET_SIZE 512
@@ -28,6 +29,8 @@ void dns_server_set_ap_ip(const char *ip)
 
 static void dns_server_task(void *pvParameters)
 {
+    HEAP_TRACE_START("DNS_TASK");
+
     dns_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (dns_sock < 0)
     {
@@ -47,6 +50,9 @@ static void dns_server_task(void *pvParameters)
         return;
     }
     ESP_LOGI(TAG, "DNS hijack server started");
+
+    HEAP_TRACE_END(100); // DNS socket and task setup may allocate memory
+
     while (1)
     {
         struct sockaddr_in client_addr;
@@ -95,9 +101,13 @@ static void dns_server_task(void *pvParameters)
 
 void dns_server_start(const char *ap_ip)
 {
+    HEAP_TRACE_START("DNS_START");
+
     if (ap_ip)
         dns_server_set_ap_ip(ap_ip);
     xTaskCreate(dns_server_task, "dns_server", 2048, NULL, 3, NULL);
+
+    HEAP_TRACE_END(200); // Task creation allocates memory for task stack and TCB
 }
 
 void dns_server_stop(void)

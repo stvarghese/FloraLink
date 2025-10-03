@@ -13,6 +13,7 @@
 #include "led_strip.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
+#include "commonutils.h"
 
 #ifdef CONFIG_BLINK_LED_STRIP
 // Handle for addressable LED strip
@@ -27,6 +28,8 @@ static uint8_t s_led_state = 0;
  */
 void blink_init(void)
 {
+    HEAP_TRACE_START("BLINK_INIT");
+
     led_strip_config_t strip_config = {
         .strip_gpio_num = CONFIG_BLINK_GPIO,
         .max_leds = 1,
@@ -47,6 +50,8 @@ void blink_init(void)
 #error "unsupported LED strip backend"
 #endif
     led_strip_clear(led_strip);
+
+    HEAP_TRACE_END(100); // LED strip initialization may allocate driver resources
 }
 
 /**
@@ -79,8 +84,12 @@ static uint8_t s_led_state = 0;
  */
 void blink_init(void)
 {
+    HEAP_TRACE_START("BLINK_INIT");
+
     gpio_reset_pin(CONFIG_BLINK_GPIO);
     gpio_set_direction(CONFIG_BLINK_GPIO, GPIO_MODE_OUTPUT);
+
+    HEAP_TRACE_END_DEFAULT(); // GPIO init should not allocate significant memory
 }
 
 /**

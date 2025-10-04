@@ -63,12 +63,16 @@ body {
 h1 {
     margin: 24px 24px 0 24px;
     font-size: 2em;
+    font-weight: 700;
     color: #2196f3;
+    /* keep section headers bold */
 }
 
 h2 {
     margin: 16px 24px 0 24px;
     color: #2196f3;
+    font-weight: 500;
+    /* make section headers not bold */
 }
 
 .distance-label {
@@ -148,11 +152,17 @@ button {
     cursor: pointer;
 }
 
+#nodesPanel {
+    margin: 12px 24px 0 24px;
+    /* align node list with other content margins */
+}
+
 .node-card {
     background: #fff;
     border-radius: 12px;
     box-shadow: 0 2px 8px #0001;
     margin: 18px 0;
+    /* no horizontal margin so it aligns with #nodesPanel edges */
     padding: 18px 24px 12px 24px;
     font-size: 1.08em;
     display: flex;
@@ -184,8 +194,23 @@ button {
 .node-info {
     display: flex;
     align-items: center;
+    /* center the row itself */
     gap: 16px;
     margin-bottom: 2px;
+}
+
+/* Each icon+value pair as an inline-flex cell for vertical centering */
+.sensor {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    line-height: 1.2;
+}
+
+.sensor .icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .node-status.online {

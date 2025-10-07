@@ -37,4 +37,8 @@ void monitor_update_cpu_load(void);
 
 void vApplicationIdleHook(void);
 
+// Power management functions
+void monitor_suspend_rmt(void);
+void monitor_resume_rmt(void);
+
 #endif // MONITOR_H

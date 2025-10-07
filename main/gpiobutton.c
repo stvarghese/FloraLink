@@ -2,6 +2,8 @@
 #include "gpiobutton.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+// #include "ets_sys.h"
+#include "modemanager.h"
 
 // **********Config section************
 // GPIO button config table
@@ -39,7 +41,29 @@ static void IRAM_ATTR gpiobutton_isr_handler(void *arg)
     gpiobutton_event_t evt;
     evt.gpio_num = (uint32_t)arg;
     evt.timestamp_us = esp_timer_get_time();
-    xQueueSendFromISR(gpiobutton_evt_queue, &evt, NULL);
+
+    // Read current GPIO level to detect noise
+    int gpio_level = gpio_get_level((gpio_num_t)evt.gpio_num);
+
+    // Detect noise on the button line
+    if (gpio_level != 0)
+    {
+        return; // Ignore noise events
+    }
+
+    // Add ISR debug logging with minimal overhead
+    // ets_printf("GPIO ISR: pin=%lu, level=%d, time=%lld\n", evt.gpio_num, gpio_level, evt.timestamp_us);
+
+    // Check if in active phase, if yes - notify the button input processing for callbacks
+    // else if called from (PM auto) light sleep, notify wakeup activity
+    if (modemanager_is_active())
+    {
+        xQueueSendFromISR(gpiobutton_evt_queue, &evt, NULL);
+    }
+    else
+    {
+        modemanager_notify_wkup_activity_from_isr();
+    }
 }
 
 // Returns true if the button is pressed (active LOW)
@@ -173,4 +197,32 @@ bool gpiobutton_detect_multi_press_poll(gpio_num_t gpio_num, int required_presse
         return true;
     }
     return false;
+}
+
+void gpiobutton_configure_sleep_wakeup(gpio_num_t gpio_num)
+{
+    // Configure the GPIO as input with pull-up for sleep wakeup
+    gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << gpio_num,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE};
+    gpio_config(&io_conf);
+
+    ESP_LOGD(TAG, "Configured GPIO %d for sleep wakeup", gpio_num);
+}
+
+// Disable the interrupt
+void gpiobutton_disable_interrupt(gpio_num_t gpio_num)
+{
+    gpio_intr_disable(gpio_num);
+    ESP_LOGD(TAG, "Disabled interrupt for GPIO %d", gpio_num);
+}
+
+// (Re)Enable the interrupt
+void gpiobutton_enable_interrupt(gpio_num_t gpio_num)
+{
+    gpio_intr_enable(gpio_num);
+    ESP_LOGD(TAG, "Enabled interrupt for GPIO %d", gpio_num);
 }

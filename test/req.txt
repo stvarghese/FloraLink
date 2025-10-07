@@ -1,0 +1,3 @@
+# Dependencies for test/testnode.py (Python 3.13)
+# Use a recent websockets that supports Python 3.13
+websockets>=12.0

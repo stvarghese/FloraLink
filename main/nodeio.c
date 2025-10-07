@@ -1,5 +1,6 @@
 #include "websockserver.h"
 #include "nodeio.h"
+#include "modemanager.h"
 #include "esp_log.h"
 #include "nodeioprotocol.h"
 #include "cJSON.h"
@@ -540,8 +541,11 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
                 cJSON_Delete(root);
                 return;
             }
+            // Reset/extend active window on valid node data (auto sleep version)
+            modemanager_notify_activity_auto();
         }
     }
+#include "modemanager.h"
     cJSON_Delete(root);
 
     // 3. Store/update node state, sensor values, etc.
@@ -800,6 +804,14 @@ static void nodeio_handle_disconnect(int client_fd, uint8_t node_id)
 {
     HEAP_TRACE_START("DISCONNECT");
 
+    // Check if it is a duplicate call to disconnect, can happen in case of direct disconnect request from node
+    if (node_contexts[node_id].p_node == NULL && node_contexts[node_id].p_msg == NULL)
+    {
+        // ESP_LOGW(TAG, "Node %d already disconnected, ignoring duplicate disconnect request", node_id);
+        HEAP_TRACE_END_DEFAULT();
+        return;
+    }
+
     ESP_LOGD(TAG, "Node %d disconnect request", node_id);
     // Purge node context, free allocated memories (node and msg)
     node_params_t *p_node = node_contexts[node_id].p_node;
@@ -815,18 +827,23 @@ static void nodeio_handle_disconnect(int client_fd, uint8_t node_id)
         node_contexts[node_id].p_msg = NULL;
     }
 
+    // unsubscribe if subscribed
+    nodeio_unsubscribe_from_node(client_fd);
+
     // Calculate and log node uptime
     if (node_contexts[node_id].node_uptime_start != 0)
     {
         node_contexts[node_id].node_uptime = (esp_timer_get_time() / 1000000) - node_contexts[node_id].node_uptime_start; // in seconds
-        ESP_LOGI(TAG, "Node %d uptime: %lld seconds", node_id, node_contexts[node_id].node_uptime);
+        ESP_LOGI(TAG, "Node %d disconnected, uptime: %lld seconds", node_id, node_contexts[node_id].node_uptime);
         node_contexts[node_id].node_uptime_start = 0; // Reset start time
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Node %d disconnected", node_id);
     }
 
     // Handle client disconnection
-    nodeio_unsubscribe_from_node(client_fd);
     websockserver_session_remove(client_fd);
-    ESP_LOGI(TAG, "Node %d disconnected", node_id);
 
     HEAP_TRACE_END_DEFAULT();
 }
@@ -1031,7 +1048,6 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
                 offset += snprintf(json + offset, json_size - offset, ",");
             first_node = 0;
 
-            int connected = 1;
             int64_t uptime = ctx->node_uptime;
 
             // Map backend fields to frontend expectations
@@ -1122,4 +1138,19 @@ esp_err_t nodeio_init(void)
     websockserver_set_close_callback(nodeio_on_close);
     ESP_LOGI(TAG, "NodeIO WebSocket server ready");
     return ESP_OK;
+}
+
+int nodeio_get_connected_node_count(void)
+{
+    int node_count = 0;
+    for (int i = 0; i < MAX_NODES; i++)
+    {
+        node_context_t *ctx = &node_contexts[i];
+        if (ctx->p_node && ctx->p_session && ctx->p_session->connected &&
+            ctx->p_node->current_state == NODEIO_STATE_CONNECTED)
+        {
+            node_count++;
+        }
+    }
+    return node_count;
 }

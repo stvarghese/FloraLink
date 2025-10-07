@@ -21,116 +21,302 @@
  * - All initialization is performed in init_task, which deletes itself after setup.
  */
 
-#include "blink.h"
+#include "onboardled.h"
 #include "distance.h"
 #include "monitor.h"
 #include "gpiobutton.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "esp_log.h"
 #include "sdkconfig.h"
 #include "esp_system.h"
 #include "esp_cpu.h"
-
 #include "webserver.h"
 #include "websockserver.h"
 #include "wifi_setup.h"
 #include "nodeio.h"
 #include "nvm.h"
+#include "dns_server.h"
+#include "modemanager.h"
+
 #include "commonutils.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "FloraLink";
 
 /**
- * @brief Task to periodically toggle the LED.
+ * @brief Task to manage LED status indication.
  *
- * Uses blink_toggle() to change the LED state at the interval specified by CONFIG_BLINK_PERIOD.
- * Runs indefinitely.
+ * Provides visual feedback for system status using different LED patterns.
+ * Uses non-blocking patterns for efficient resource usage.
  * @param pvParameters Unused
  */
 static void led_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "LED task started, on core %d", xPortGetCoreID());
+
+    // State tracking for efficient updates
+    bool last_wifi_state = false;
+    int last_node_count = -1;
+
     while (1)
     {
-        blink_toggle();
-        vTaskDelay(blink_get_period_ms() / portTICK_PERIOD_MS);
+        // Wait for active mode (blocks during idle phase)
+        xEventGroupWaitBits(g_mode_event_group,
+                            MODE_ACTIVE_BIT,
+                            pdFALSE,        // Don't clear on exit
+                            pdTRUE,         // Wait for all bits
+                            portMAX_DELAY); // Wait forever
+
+        ESP_LOGD(TAG, "LED task entering active phase");
+
+        // Active phase loop - runs while active bit is set
+        while (xEventGroupGetBits(g_mode_event_group) & MODE_ACTIVE_BIT)
+        {
+            // Get current system status
+            bool wifi_connected = wifi_is_connected();
+            int node_count = nodeio_get_connected_node_count();
+
+            // Check if status changed
+            bool status_changed = (wifi_connected != last_wifi_state ||
+                                   node_count != last_node_count);
+
+            // Stop current pattern if status changed
+            if (status_changed || onboardled_is_pattern_running())
+            {
+                onboardled_stop_pattern();
+            }
+
+            // Start appropriate pattern if none running
+            if (!onboardled_is_pattern_running())
+            {
+                if (!wifi_connected)
+                {
+                    onboardled_start_blink(250, 250, 0, &ONBOARDLED_COLOR_ORANGE);
+                }
+                else if (node_count == 0)
+                {
+                    onboardled_start_heartbeat(0, 100, 300, 3000, &ONBOARDLED_COLOR_GREEN);
+                }
+                else
+                {
+                    onboardled_start_heartbeat(0, 100, 300, 2000, &ONBOARDLED_COLOR_BLUE);
+                }
+            }
+
+            // Update state tracking
+            last_wifi_state = wifi_connected;
+            last_node_count = node_count;
+
+            // 3s delay during active phase only
+            vTaskDelay(pdMS_TO_TICKS(3000));
+        }
+
+        ESP_LOGD(TAG, "LED task exiting active phase - stopping any running patterns");
+
+        // Stop any running LED patterns when exiting active phase
+        if (onboardled_is_pattern_running())
+        {
+            onboardled_stop_pattern();
+        }
     }
 }
 
 /**
  * @brief Task to periodically measure distance and log the result.
  *
- * Uses distance_measure() to read the ultrasonic sensor every 2 seconds.
- * Also generates a test pulse on GPIO 4 for RMT monitoring.
+ * Uses distance_measure() to read the ultrasonic sensor every 500ms during active phase only.
+ * Completely suspends during idle phase to save power.
  * @param pvParameters Unused
  */
 static void distance_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Distance task started, on core %d", xPortGetCoreID());
+
     while (1)
     {
-        uint32_t distance = 0;
-        esp_err_t measure_result = distance_measure(400, &distance);
-        if (measure_result == ESP_OK)
+        // Wait for active mode (blocks during idle phase)
+        xEventGroupWaitBits(g_mode_event_group,
+                            MODE_ACTIVE_BIT,
+                            pdFALSE,        // Don't clear on exit
+                            pdTRUE,         // Wait for all bits
+                            portMAX_DELAY); // Wait forever
+
+        ESP_LOGD(TAG, "Distance task entering active phase");
+
+        // Active phase loop - runs while active bit is set
+        while (xEventGroupGetBits(g_mode_event_group) & MODE_ACTIVE_BIT)
         {
-            // distance_publish(PUB_LOG, distance);
-            distance_publish(PUB_WEBSERVER, distance);
+            uint32_t distance = 0;
+            esp_err_t measure_result = distance_measure(400, &distance);
+            if (measure_result == ESP_OK)
+            {
+                distance_publish(PUB_WEBSERVER, distance);
+            }
+            else
+            {
+                distance_publish_err(PUB_LOG, measure_result);
+                distance_publish_err(PUB_WEBSERVER, measure_result);
+            }
+
+            // 500ms delay during active phase only
+            vTaskDelay(pdMS_TO_TICKS(500));
         }
-        else
-        {
-            distance_publish_err(PUB_LOG, measure_result);
-            distance_publish_err(PUB_WEBSERVER, measure_result);
-        }
-        // Generate a test pulse for RMT monitor (4us low, 10us high)
-        // misc_test_function();
-        vTaskDelay(500 / portTICK_PERIOD_MS);
+
+        ESP_LOGD(TAG, "Distance task exiting active phase");
     }
 }
 
 void monitor_task_1s(void *arg)
 {
     ESP_LOGI(TAG, "monitor_task_1s started, on core %d", xPortGetCoreID());
+
     while (1)
     {
-        HEAP_TRACE_START("MONITOR_1S");
+        // Wait for active mode (blocks during idle phase)
+        xEventGroupWaitBits(g_mode_event_group,
+                            MODE_ACTIVE_BIT,
+                            pdFALSE,        // Don't clear on exit
+                            pdTRUE,         // Wait for all bits
+                            portMAX_DELAY); // Wait forever
 
-        // Update CPU load even if no RMT event
-        monitor_update_cpu_load();
-        nodeio_monitor_nodeslist();
-        // Ping every 5 seconds
-        static int ping_counter = 0;
-        if (++ping_counter >= 5)
+        ESP_LOGD(TAG, "Monitor task entering active phase");
+
+        // Active phase loop - runs while active bit is set
+        while (xEventGroupGetBits(g_mode_event_group) & MODE_ACTIVE_BIT)
         {
-            nodeio_active_nodes_ping();
-            ping_counter = 0;
+            HEAP_TRACE_START("MONITOR_1S");
+
+            // Update CPU load even if no RMT event
+            monitor_update_cpu_load();
+            nodeio_monitor_nodeslist();
+
+            // Ping every 5 seconds
+            static int ping_counter = 0;
+            if (++ping_counter >= 5)
+            {
+                nodeio_active_nodes_ping();
+                ping_counter = 0;
+            }
+            nodeio_process_subscription_updates();
+
+            // Webserver health monitor every 30 seconds
+            static int webserver_health_counter = 0;
+            if (++webserver_health_counter >= 30)
+            {
+                webserver_health_monitor();
+                webserver_health_counter = 0;
+            }
+
+            // modemanager_dump_pm_locks();
+
+            HEAP_TRACE_END_TIMER(); // Monitor task includes ping operations which allocate memory
+
+            // 1s delay during active phase only
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
-        nodeio_process_subscription_updates();
 
-        HEAP_TRACE_END_TIMER(); // Monitor task includes ping operations which allocate memory
-
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        ESP_LOGD(TAG, "Monitor task exiting active phase");
     }
 }
 
 void input_process_task(void *arg)
 {
     ESP_LOGI(TAG, "input_process_task started, on core %d", xPortGetCoreID());
+
     while (1)
     {
-        process_gpiobutton_events();
-        // Always yield to avoid watchdog
-        vTaskDelay(1);
+        // Wait for active mode (blocks during idle phase)
+        xEventGroupWaitBits(g_mode_event_group,
+                            MODE_ACTIVE_BIT,
+                            pdFALSE,        // Don't clear on exit
+                            pdTRUE,         // Wait for all bits
+                            portMAX_DELAY); // Wait forever
+
+        ESP_LOGD(TAG, "Input process task entering active phase");
+
+        // Process events frequently during active phase
+        while (xEventGroupGetBits(g_mode_event_group) & MODE_ACTIVE_BIT)
+        {
+            // Process any pending button events (non-blocking)
+            process_gpiobutton_events();
+
+            // Active mode: frequent processing for responsiveness
+            vTaskDelay(pdMS_TO_TICKS(10)); // 10ms during active phase
+        }
+
+        ESP_LOGD(TAG, "Input process task exiting active phase");
     }
 }
 
 void monitor_task_rmt(void *arg)
 {
     ESP_LOGI(TAG, "monitor_task_rmt started, on core %d", xPortGetCoreID());
+
     while (1)
     {
-        monitor_process_rmt_rx();
+        // Wait for active mode (blocks during idle phase)
+        xEventGroupWaitBits(g_mode_event_group,
+                            MODE_ACTIVE_BIT,
+                            pdFALSE,        // Don't clear on exit
+                            pdTRUE,         // Wait for all bits
+                            portMAX_DELAY); // Wait forever
+
+        ESP_LOGD(TAG, "RMT monitor task entering active phase");
+
+        // Active phase loop - runs while active bit is set
+        while (xEventGroupGetBits(g_mode_event_group) & MODE_ACTIVE_BIT)
+        {
+            // Process RMT events during active phase only
+            monitor_process_rmt_rx();
+        }
+
+        ESP_LOGD(TAG, "RMT monitor task exiting active phase");
     }
+}
+
+/**
+ * @brief Activity notification task for ISR-safe mode management.
+ *
+ * This high-priority task handles activity notifications from ISRs
+ * and triggers the mode manager to enter active mode.
+ */
+void activity_notification_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Activity notification task started, on core %d", xPortGetCoreID());
+
+    while (1)
+    {
+        // Wait for notification from ISR (blocks indefinitely)
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        // Activity detected - enter active mode
+        ESP_LOGD(TAG, "Activity notification received from ISR");
+        modemanager_enter_active_auto();
+    }
+}
+
+/**
+ * @brief DNS server task for captive portal functionality.
+ *
+ * Provides DNS hijacking to redirect all requests to the AP IP address
+ * during WiFi configuration mode. This task is created conditionally
+ * when in AP mode.
+ */
+void dns_server_task(void *pvParameters)
+{
+    // DNS server implementation delegated to dns_server module
+    dns_server_run(); // This function contains the actual DNS task logic
+}
+
+/**
+ * @brief DNS server task creation function.
+ *
+ * Creates the DNS server task and starts the DNS server.
+ */
+void dns_server_create_task(void)
+{
+    xTaskCreate(dns_server_task, "dns_server", 2048, NULL, 5, NULL);
 }
 
 /**
@@ -150,6 +336,12 @@ static void init_task(void *pvParameters)
     {
         ESP_LOGE(TAG, "Failed to initialize NVM storage");
         vTaskDelete(NULL);
+    }
+
+    // Configure auto light sleep for power management
+    if (modemanager_init_auto_light_sleep() != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to configure auto light sleep - continuing anyway");
     }
 
     if (wifi_setup() != ESP_OK)
@@ -188,7 +380,22 @@ static void init_task(void *pvParameters)
     esp_log_level_set("SESSION_REMOVE", ESP_LOG_DEBUG);
     esp_log_level_set("NODESLIST", ESP_LOG_DEBUG);
 #endif
+    esp_log_level_set("onboardled", ESP_LOG_DEBUG);
+    esp_log_level_set("wifi", ESP_LOG_DEBUG);
+    esp_log_level_set("WiFiSetup", ESP_LOG_DEBUG);
+    esp_log_level_set("ModeManager", ESP_LOG_DEBUG);
+    esp_log_level_set("FloraLink", ESP_LOG_DEBUG);
+    esp_log_level_set("monitor", ESP_LOG_DEBUG);
     blink_init();
+
+    // Run onboard LED test pattern to verify functionality
+    onboardled_test_pattern();
+
+    // Show off RGB capabilities with a colorful dance
+    // ESP_LOGD(TAG, "LED color dance starting...");
+    // onboardled_dance(2, 80, 40); // 2 cycles, 80ms on, 40ms off per color
+    // ESP_LOGD(TAG, "LED color dance complete");
+
     monitor_init();
     gpiobutton_init(WIFI_RESET_PIN, wifi_reset_button_cb);
     xTaskCreate(led_task, "led_task", 2048, NULL, 5, NULL);
@@ -196,6 +403,14 @@ static void init_task(void *pvParameters)
     xTaskCreate(monitor_task_1s, "monitor_task_1s", 4096, NULL, 5, NULL);
     xTaskCreate(monitor_task_rmt, "monitor_task_rmt", 4096, NULL, 5, NULL);
     xTaskCreate(input_process_task, "input_process_task", 2048, NULL, 10, NULL);
+
+    // Create activity notification task for ISR-safe notifications (high priority)
+    TaskHandle_t activity_task_handle;
+    xTaskCreate(activity_notification_task, "activity_notify", 4096, NULL, 15, &activity_task_handle);
+    modemanager_set_activity_task_handle(activity_task_handle);
+
+    // Enter active phase to start normal operation (auto sleep version)
+    modemanager_enter_active_auto();
     vTaskDelete(NULL);
 }
 

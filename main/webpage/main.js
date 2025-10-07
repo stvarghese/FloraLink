@@ -185,18 +185,18 @@ function fetchNodes() {
                 html += `<div class='${cardClass}'>`;
                 html += `<div class='node-title'>Node: <span class='node-id'>${node.id ?? '-'}</span></div>`;
                 if (online) {
+                    html += `<div class='node-status online'>Online</div>`;
                     html += `<div class='node-info'>`;
                     html += `<span class=\"sensor\">${tempIcon}<span>${(node.temperature ?? '-') + (node.temperature != null ? '°C' : '')}</span></span>`;
                     html += ` <span class=\"sensor\">${humidIcon}<span>${(node.humidity ?? '-') + (node.humidity != null ? '%' : '')}</span></span>`;
                     const battVal = (node.battery !== undefined ? node.battery : (node.batt !== undefined ? node.batt : null));
                     html += ` <span class=\"sensor\">${battIcon}<span>${battVal != null ? (battVal + 'V') : '-'}</span></span>`;
                     html += ` <span class=\"sensor\">${moistIcon}<span>${node.moisture != null ? node.moisture : '-'}</span></span>`;
-                    html += `<span class=\"node-status online\">Online</span>`;
                     html += `</div>`;
                     html += `<div class='node-uptime'>Uptime: ${uptime}</div>`;
                 } else {
                     html += `<div class='node-status offline'>Offline</div>`;
-                    html += `<div class='node-lastseen'>Offline since: <span style='color:#d32f2f'>${lastSeen}</span></div>`;
+                    html += `<div class='node-lastseen'>Last seen: <span style='color:#d32f2f'>${lastSeen}</span></div>`;
                     html += `<div class='node-uptime'>Last Uptime: ${lastUptime}</div>`;
                 }
                 html += `</div>`;

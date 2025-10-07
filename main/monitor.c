@@ -111,6 +111,9 @@ void monitor_update_cpu_load(void)
     s_last_time = now;
     s_last_idle_count = idle;
 
+    ESP_LOGD(TAG, "Idle Task entered %llu times in last %llu us -> CPU Load: %.2f%%",
+             didle, dt, s_cpu_load * 100.0f);
+
     HEAP_TRACE_END_DEFAULT(); // CPU load calculation should not allocate memory
 }
 
@@ -227,4 +230,50 @@ void monitor_init(void)
     rmt_receive(g_rx_chan, g_rx_buf, g_rx_buf_sz, &g_rx_cfg);
     // 8. Create event queue (task is created in tasks.c)
     s_rmt_evt_q = xQueueCreate(10, sizeof(rmt_rx_done_event_data_t));
+}
+
+/**
+ * @brief Suspend RMT monitoring to save power during idle periods.
+ *
+ * Disables the RMT channel and stops monitoring. This releases the
+ * APB_FREQ_MAX power management lock that prevents auto light sleep.
+ */
+void monitor_suspend_rmt(void)
+{
+    if (g_rx_chan)
+    {
+        ESP_LOGI(TAG, "Suspending RMT monitoring for power savings");
+        esp_err_t ret = rmt_disable(g_rx_chan);
+        if (ret != ESP_OK)
+        {
+            ESP_LOGW(TAG, "Failed to disable RMT channel: %s", esp_err_to_name(ret));
+        }
+    }
+}
+
+/**
+ * @brief Resume RMT monitoring after idle period.
+ *
+ * Re-enables the RMT channel and restarts monitoring. The system
+ * will hold APB_FREQ_MAX lock again but provides full functionality.
+ */
+void monitor_resume_rmt(void)
+{
+    if (g_rx_chan)
+    {
+        ESP_LOGI(TAG, "Resuming RMT monitoring");
+        esp_err_t ret = rmt_enable(g_rx_chan);
+        if (ret != ESP_OK)
+        {
+            ESP_LOGW(TAG, "Failed to enable RMT channel: %s", esp_err_to_name(ret));
+            return;
+        }
+
+        // Re-arm for reception
+        ret = rmt_receive(g_rx_chan, g_rx_buf, g_rx_buf_sz, &g_rx_cfg);
+        if (ret != ESP_OK)
+        {
+            ESP_LOGW(TAG, "Failed to restart RMT reception: %s", esp_err_to_name(ret));
+        }
+    }
 }

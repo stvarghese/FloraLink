@@ -23,10 +23,14 @@ MSG_TYP_DISCONNECT_REQUEST = "disconnect_request"
 SAMPLE_MSG_PATH = os.path.join(os.path.dirname(__file__), "..", "main", "samplenodemsg.json")
 
 def build_base_message(msg_type, node_id, seq_num):
+    # Ensure node_id is numeric for strict backend parsing
+    node_id = int(node_id)
     return {
         "magic": PROTOCOL_MAGIC,
         "type": msg_type,
         "node_id": node_id,
+        "controller": 2,  # CONTROLLER_ARDUINO
+        "sw_version": "1.0.0",
         "sensors": ["temperature", "humidity", "moisture"],
         "services": ["diagnostics", "ota"],
         "seq_num": seq_num,
@@ -36,7 +40,22 @@ def build_base_message(msg_type, node_id, seq_num):
 
 def build_payloads(sensors):
     # Generate dummy sensor values for each sensor
-    sensor_values = {s: 42.0 for s in sensors}
+    # Create simple varying values across sensors
+    t = int(time.time())
+    sensor_values = {}
+    for idx, s in enumerate(sensors):
+        if s == "temperature":
+            sensor_values[s] = 20.0 + (t % 10)  # 20..29 C
+        elif s == "humidity":
+            sensor_values[s] = 40 + (t % 20)    # 40..59 %
+        elif s == "moisture":
+            sensor_values[s] = 200 + (t % 100)  # arbitrary units
+        elif s == "distance":
+            sensor_values[s] = 50 + (t % 50)    # cm
+        elif s == "light":
+            sensor_values[s] = 100 + (t % 200)  # lux-ish
+        else:
+            sensor_values[s] = 42.0
     sensor_payload = {
         "type": MSG_PAYLOAD_TYPE_SENSOR,
         "sensor": sensor_values
@@ -44,9 +63,9 @@ def build_payloads(sensors):
     diagnostics_payload = {
         "type": MSG_PAYLOAD_TYPE_DIAGNOSTICS,
         "diagnostics": {
-            "uptime_sec": 123456,
-            "free_heap": 20480,
-            "rssi": -65,
+            "uptime_sec": t % 200000,
+            "free_heap": 20000 + (t % 5000),
+            "rssi": -70 + (t % 5),
             "error_code": 0,
             "info": "No issues detected"
         }
@@ -82,15 +101,29 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
             print(msg)
 
     websocket = None
+    recv_task = None
     seq_num = 1
 
     try:
         # === Connect phase ===
         try:
-            websocket = await websockets.connect(uri, ping_timeout=None)
-            log(f"[Node {node_id}] Connected to {uri}")
+            # Match ESP-IDF server's supported_subprotocol ("arduino").
+            # Disable client pings; the Hub pings and we must read to auto-pong.
+            websocket = await websockets.connect(
+                uri,
+                subprotocols=["arduino"],
+                ping_timeout=None,
+                ping_interval=None,
+                max_size=2**20,
+            )
+            log(f"[Node {node_id}] Connected to {uri} (subprotocol: {websocket.subprotocol})")
+            if websocket.subprotocol != "arduino":
+                log(f"[Node {node_id}] Warning: negotiated subprotocol is '{websocket.subprotocol}', expected 'arduino'")
+        except getattr(websockets, 'NegotiationError', Exception) as e:  # older/newer websockets versions
+            log(f"[Node {node_id}] Subprotocol negotiation failed: {e}")
+            return
         except Exception as e:
-            log(f"[Node {node_id}] Failed to connect: {e}")
+            log(f"[Node {node_id}] Failed to connect: {repr(e)}")
             return
 
         # Send connect request
@@ -100,7 +133,7 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
 
         # Wait for acceptance
         try:
-            response = await asyncio.wait_for(websocket.recv(), timeout=5)
+            response = await asyncio.wait_for(websocket.recv(), timeout=10)
             log(f"[Node {node_id}] Received: {response}")
             resp_obj = json.loads(response)
             if resp_obj.get("type") != "connect_response" or resp_obj.get("status") != "accepted":
@@ -109,6 +142,29 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
         except asyncio.TimeoutError:
             log(f"[Node {node_id}] No response to connect request (timeout). Exiting.")
             return
+
+        # Start background receiver to process control frames (ping/pong) and any messages
+        async def _receiver():
+            try:
+                while True:
+                    try:
+                        msg = await websocket.recv()
+                        # Optional: log unexpected server pushes
+                        if log_enabled.is_set():
+                            print(f"[Node {node_id}] <- {msg}")
+                    except asyncio.CancelledError:
+                        break
+                    except websockets.ConnectionClosed:  # server closed
+                        break
+                    except Exception as e:
+                        # Keep receiving unless fatal
+                        if log_enabled.is_set():
+                            print(f"[Node {node_id}] Receiver error: {e}")
+                        await asyncio.sleep(0.05)
+            finally:
+                return
+
+        recv_task = asyncio.create_task(_receiver())
 
         # === Active phase ===
         while True:
@@ -125,20 +181,18 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                 await control_event.wait()
 
                 # Build sensor data message
-                sensors = sample_msg.get("sensors", sample_msg)
+                # sensors/services from template if present
+                sensors = sample_msg.get("sensors", ["temperature", "humidity", "moisture"])
+                services = sample_msg.get("services", ["diagnostics", "ota"])
                 msg = build_base_message(MSG_TYP_NODE_DATA, node_id, seq_num)
                 msg["sensors"] = sensors
+                msg["services"] = services
                 msg["payload"] = build_payloads(sensors)
 
                 await websocket.send(json.dumps(msg))
                 log(f"[Node {node_id}] Sent live data")
 
-                # Try to read a response (not expected, so timeout quickly)
-                try:
-                    response = await asyncio.wait_for(websocket.recv(), timeout=0.1)
-                    log(f"[Node {node_id}] Received (unexpected): {response}")
-                except asyncio.TimeoutError:
-                    pass
+                # Receiver runs in background; no foreground recv needed
 
                 seq_num += 1
 
@@ -163,6 +217,13 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
 
     finally:
         # === Final cleanup ===
+        if recv_task is not None:
+            try:
+                recv_task.cancel()
+                with contextlib.suppress(Exception):
+                    await recv_task
+            except Exception:
+                pass
         if websocket is not None:
             try:
                 await websocket.close()
@@ -298,7 +359,14 @@ async def cli_loop(node_manager, log_enabled):
         # Actions with more than one node ID possible
         if action in {"add", "remove", "pause", "resume", "status"} and len(cmd) >= 2:
             try:
-                node_ids = [int(x) for x in cmd[1:]]
+                node_ids = []
+                for tok in cmd[1:]:
+                    if '-' in tok:
+                        a, b = tok.split('-', 1)
+                        a = int(a); b = int(b)
+                        node_ids.extend(list(range(min(a,b), max(a,b)+1)))
+                    else:
+                        node_ids.append(int(tok))
             except ValueError:
                 print("Invalid node ID(s). Must be integers.")
                 continue
@@ -375,7 +443,11 @@ if __name__ == "__main__":
     # If user provided ws://host/ws (no port), default to port 80
     from urllib.parse import urlparse
     parsed = urlparse(uri)
-    if parsed.port is None and parsed.scheme.startswith('ws'):
-        # Rebuild URI with :80 if not present
-        uri = f"{parsed.scheme}://{parsed.hostname}:80{parsed.path}"
+    if parsed.scheme.startswith('ws'):
+        host = parsed.hostname
+        port = parsed.port or 80
+        path = parsed.path or ''
+        if path in ('', '/'):
+            path = '/ws'
+        uri = f"{parsed.scheme}://{host}:{port}{path}"
     asyncio.run(main(uri, num_nodes, interval))

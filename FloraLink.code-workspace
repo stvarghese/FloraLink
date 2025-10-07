@@ -55,7 +55,10 @@
 			"commonutils.h": "c",
 			"base64.h": "c",
 			"constant_time_internal.h": "c",
-			"esp_heap_caps.h": "c"
+			"esp_heap_caps.h": "c",
+			"esp_sleep.h": "c",
+			"webserver.h": "c",
+			"rmt_rx.h": "c"
 		},
 		"powershell.cwd": "FloraLink"
 	}

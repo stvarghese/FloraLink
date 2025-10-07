@@ -36,4 +36,13 @@ bool gpiobutton_detect_multi_press_poll(gpio_num_t gpio_num, int required_presse
 // Process button events from the queue, call user callback if set
 void process_gpiobutton_events();
 
+// Configure GPIO for sleep wakeup (GPIO config only, sleep enable calls handled elsewhere)
+void gpiobutton_configure_sleep_wakeup(gpio_num_t gpio_num);
+
+// Disable the interrupt
+void gpiobutton_disable_interrupt(gpio_num_t gpio_num);
+
+// Enable the interrupt
+void gpiobutton_enable_interrupt(gpio_num_t gpio_num);
+
 #endif // GPIOBUTTON_H

@@ -14,6 +14,7 @@
 #include "driver/gpio.h"
 #include "dns_server.h"
 #include "commonutils.h"
+#include "modemanager.h"
 
 #define WIFI_MAX_RETRY 5
 #define WIFI_CONNECTED_BIT BIT0
@@ -344,12 +345,16 @@ esp_err_t wifi_setup(void)
                                                         NULL,
                                                         &instance_got_ip));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
+    // Configure initial listen interval before starting WiFi
+    wifi_config.sta.listen_interval = 3; // Start with default responsive setting
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    
-    // Disable WiFi power save to prevent connection drops
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
-    ESP_LOGI(TAG, "WiFi power save disabled for stable connection");
+
+    // Configure WiFi power save for light sleep compatibility
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MAX_MODEM));
+
+    ESP_LOGI(TAG, "WiFi configured for responsive operation (will adjust for sleep)");
 
     ESP_LOGI(TAG, "wifi_init_sta finished.");
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
@@ -374,4 +379,63 @@ esp_err_t wifi_setup(void)
 const char *wifi_get_ssid(void)
 {
     return s_current_ssid;
+}
+
+void wifi_configure_active_mode(void)
+{
+    wifi_config_t wifi_config;
+    esp_err_t ret = esp_wifi_get_config(WIFI_IF_STA, &wifi_config);
+    if (ret == ESP_OK)
+    {
+        wifi_config.sta.listen_interval = 3; // More responsive for real-time communication
+        ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+        if (ret == ESP_OK)
+        {
+            ESP_LOGD(TAG, "WiFi configured for active mode (listen_interval=3)");
+        }
+        else if (ret == ESP_ERR_WIFI_STATE)
+        {
+            ESP_LOGW(TAG, "Cannot configure active mode - WiFi is connecting/disconnecting");
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Failed to configure active mode: %s", esp_err_to_name(ret));
+        }
+    }
+}
+
+void wifi_configure_sleep_mode(void)
+{
+    wifi_config_t wifi_config;
+    esp_err_t ret = esp_wifi_get_config(WIFI_IF_STA, &wifi_config);
+    if (ret == ESP_OK)
+    {
+        wifi_config.sta.listen_interval = 10; // Less responsive but more power efficient
+
+        ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+        if (ret == ESP_OK)
+        {
+            ESP_LOGD(TAG, "WiFi configured for sleep mode (listen_interval=10)");
+        }
+        else if (ret == ESP_ERR_WIFI_STATE)
+        {
+            ESP_LOGW(TAG, "Cannot configure sleep mode - WiFi is connecting/disconnecting");
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Failed to configure sleep mode: %s", esp_err_to_name(ret));
+        }
+        // also set power saving mode
+        ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MAX_MODEM));
+    }
+}
+
+bool wifi_is_connected(void)
+{
+    if (s_wifi_event_group == NULL)
+    {
+        return false;
+    }
+    EventBits_t bits = xEventGroupGetBits(s_wifi_event_group);
+    return (bits & WIFI_CONNECTED_BIT) != 0;
 }

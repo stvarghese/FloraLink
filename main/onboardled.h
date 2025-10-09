@@ -55,76 +55,76 @@ typedef struct
 } onboardled_color_t;
 
 // Control RGB brightness level (0-255)
-#define ONBOARDLED_BRIGHTNESS_SCALE 10
+#define ONBOARDLED_BRIGHTNESS_LEVEL 10
 #define ONBOARDLED_BRIGHTNESS_FULL 255
 
-#define BRSCALE ONBOARDLED_BRIGHTNESS_SCALE
-#define BRHALF (BRSCALE * 2 / 3) // 2/3 brightness instead of 1/2 for better visibility
+#define BRLEVEL ONBOARDLED_BRIGHTNESS_LEVEL
+#define BRHALF (BRLEVEL * 2 / 3) // 2/3 brightness instead of 1/2 for better visibility
 
 // Brightness scaled colour values
 #define BLACK_OFF ((onboardled_color_t){0, 0, 0})                        // Black/Off
-#define RED ((onboardled_color_t){BRSCALE, 0, 0})                        // Red - Errors, failures, SOS
-#define GREEN ((onboardled_color_t){0, BRSCALE, 0})                      // Green - Success, OK
-#define BLUE ((onboardled_color_t){0, 0, BRSCALE})                       // Blue - Heartbeat, neutral operations
-#define WHITE ((onboardled_color_t){BRSCALE, BRSCALE, BRSCALE})          // White - Maximum brightness
-#define YELLOW ((onboardled_color_t){BRSCALE, BRSCALE, 0})               // Yellow - Warnings
-#define CYAN ((onboardled_color_t){0, BRSCALE, BRSCALE})                 // Cyan - Info
-#define MAGENTA ((onboardled_color_t){BRSCALE, 0, BRSCALE})              // Magenta - Special states
-#define ORANGE ((onboardled_color_t){BRSCALE, (BRSCALE * 165) / 255, 0}) // Orange - Activity/busy
+#define RED ((onboardled_color_t){BRLEVEL, 0, 0})                        // Red - Errors, failures, SOS
+#define GREEN ((onboardled_color_t){0, BRLEVEL, 0})                      // Green - Success, OK
+#define BLUE ((onboardled_color_t){0, 0, BRLEVEL})                       // Blue - Heartbeat, neutral operations
+#define WHITE ((onboardled_color_t){BRLEVEL, BRLEVEL, BRLEVEL})          // White - Maximum brightness
+#define YELLOW ((onboardled_color_t){BRLEVEL, BRLEVEL, 0})               // Yellow - Warnings
+#define CYAN ((onboardled_color_t){0, BRLEVEL, BRLEVEL})                 // Cyan - Info
+#define MAGENTA ((onboardled_color_t){BRLEVEL, 0, BRLEVEL})              // Magenta - Special states
+#define ORANGE ((onboardled_color_t){BRLEVEL, (BRLEVEL * 165) / 255, 0}) // Orange - Activity/busy
 
 // Other interesting colors scaled to brightness
 #define PURPLE ((onboardled_color_t){BRHALF, 0, BRHALF})                                                        // Purple - Special states
-#define PINK ((onboardled_color_t){BRSCALE, BRHALF, BRHALF})                                                    // Pink - Special states
-#define ORCHID ((onboardled_color_t){BRHALF, BRHALF, BRSCALE})                                                  // Orchid - Special states
+#define PINK ((onboardled_color_t){BRLEVEL, BRHALF, BRHALF})                                                    // Pink - Special states
+#define ORCHID ((onboardled_color_t){BRHALF, BRHALF, BRLEVEL})                                                  // Orchid - Special states
 #define TEAL ((onboardled_color_t){0, BRHALF, BRHALF})                                                          // Teal - Special states
-#define LIME ((onboardled_color_t){BRHALF, BRSCALE, 0})                                                         // Lime - Special states
-#define TURQUOISE ((onboardled_color_t){0, BRSCALE, BRHALF})                                                    // Turquoise - Special states
-#define VIOLET ((onboardled_color_t){BRHALF, 0, BRSCALE})                                                       // Violet - Special states
+#define LIME ((onboardled_color_t){BRHALF, BRLEVEL, 0})                                                         // Lime - Special states
+#define TURQUOISE ((onboardled_color_t){0, BRLEVEL, BRHALF})                                                    // Turquoise - Special states
+#define VIOLET ((onboardled_color_t){BRHALF, 0, BRLEVEL})                                                       // Violet - Special states
 #define INDIGO ((onboardled_color_t){BRHALF, 0, BRHALF})                                                        // Indigo - Special states
-#define AMBER ((onboardled_color_t){BRSCALE, (BRSCALE * 191) / 255, 0})                                         // Amber - Special states
-#define GOLD ((onboardled_color_t){BRSCALE, (BRSCALE * 215) / 255, 0})                                          // Gold - Special states
-#define SALMON ((onboardled_color_t){BRSCALE, (BRSCALE * 128) / 255, (BRSCALE * 114) / 255})                    // Salmon - Special states
+#define AMBER ((onboardled_color_t){BRLEVEL, (BRLEVEL * 191) / 255, 0})                                         // Amber - Special states
+#define GOLD ((onboardled_color_t){BRLEVEL, (BRLEVEL * 215) / 255, 0})                                          // Gold - Special states
+#define SALMON ((onboardled_color_t){BRLEVEL, (BRLEVEL * 128) / 255, (BRLEVEL * 114) / 255})                    // Salmon - Special states
 #define OLIVE ((onboardled_color_t){BRHALF, BRHALF, 0})                                                         // Olive - Special states
 #define MAROON ((onboardled_color_t){BRHALF, 0, 0})                                                             // Maroon - Special states
 #define NAVY ((onboardled_color_t){0, 0, BRHALF})                                                               // Navy - Special states
-#define SILVER ((onboardled_color_t){(BRSCALE * 192) / 255, (BRSCALE * 192) / 255, (BRSCALE * 192) / 255})      // Silver - Special states
-#define BRONZE ((onboardled_color_t){(BRSCALE * 205) / 255, (BRSCALE * 127) / 255, (BRSCALE * 50) / 255})       // Bronze - Special states
-#define PEACH ((onboardled_color_t){BRSCALE, (BRSCALE * 218) / 255, (BRSCALE * 185) / 255})                     // Peach - Special states
-#define MINT ((onboardled_color_t){(BRSCALE * 189) / 255, BRSCALE, (BRSCALE * 189) / 255})                      // Mint - Special states
-#define CORAL ((onboardled_color_t){BRSCALE, (BRSCALE * 127) / 255, (BRSCALE * 80) / 255})                      // Coral - Special states
-#define SALT_PEPPER ((onboardled_color_t){(BRSCALE * 220) / 255, (BRSCALE * 220) / 255, (BRSCALE * 220) / 255}) // Salt & Pepper - Special states
-#define SKY_BLUE ((onboardled_color_t){(BRSCALE * 135) / 255, (BRSCALE * 206) / 255, BRSCALE})                  // Sky Blue - Special states
-#define LAVENDER ((onboardled_color_t){(BRSCALE * 230) / 255, (BRSCALE * 230) / 255, BRSCALE})                  // Lavender - Special states
-#define BEIGE ((onboardled_color_t){(BRSCALE * 245) / 255, (BRSCALE * 245) / 255, (BRSCALE * 220) / 255})       // Beige - Special states
-#define CREAM ((onboardled_color_t){(BRSCALE * 255) / 255, (BRSCALE * 253) / 255, (BRSCALE * 208) / 255})       // Cream - Special states
-#define PEAR ((onboardled_color_t){(BRSCALE * 209) / 255, (BRSCALE * 226) / 255, (BRSCALE * 49) / 255})         // Pear - Special states
-#define MOSS ((onboardled_color_t){(BRSCALE * 173) / 255, (BRSCALE * 223) / 255, (BRSCALE * 173) / 255})        // Moss - Special states
-#define SAND ((onboardled_color_t){(BRSCALE * 194) / 255, (BRSCALE * 178) / 255, (BRSCALE * 128) / 255})        // Sand - Special states
-#define COCOA ((onboardled_color_t){(BRSCALE * 210) / 255, (BRSCALE * 105) / 255, (BRSCALE * 30) / 255})        // Cocoa - Special states
-#define CHOCOLATE ((onboardled_color_t){(BRSCALE * 123) / 255, (BRSCALE * 63) / 255, (BRSCALE * 0) / 255})      // Chocolate - Special states
-#define TAN ((onboardled_color_t){(BRSCALE * 210) / 255, (BRSCALE * 180) / 255, (BRSCALE * 140) / 255})         // Tan - Special states
-#define PEWTER ((onboardled_color_t){(BRSCALE * 128) / 255, (BRSCALE * 128) / 255, (BRSCALE * 128) / 255})      // Pewter - Special states
-#define SLATE ((onboardled_color_t){(BRSCALE * 112) / 255, (BRSCALE * 128) / 255, (BRSCALE * 144) / 255})       // Slate - Special states
-#define STEEL ((onboardled_color_t){(BRSCALE * 70) / 255, (BRSCALE * 130) / 255, (BRSCALE * 180) / 255})        // Steel - Special states
-#define CHARCOAL ((onboardled_color_t){(BRSCALE * 54) / 255, (BRSCALE * 69) / 255, (BRSCALE * 79) / 255})       // Charcoal - Special states
-#define ASPHALT ((onboardled_color_t){(BRSCALE * 47) / 255, (BRSCALE * 79) / 255, (BRSCALE * 79) / 255})        // Asphalt - Special states
-#define ONYX ((onboardled_color_t){(BRSCALE * 53) / 255, (BRSCALE * 56) / 255, (BRSCALE * 57) / 255})           // Onyx - Special states
-#define EBONY ((onboardled_color_t){(BRSCALE * 85) / 255, (BRSCALE * 93) / 255, (BRSCALE * 80) / 255})          // Ebony - Special states
-#define IVORY ((onboardled_color_t){(BRSCALE * 255) / 255, (BRSCALE * 255) / 255, (BRSCALE * 240) / 255})       // Ivory - Special states
-#define ALMOND ((onboardled_color_t){(BRSCALE * 239) / 255, (BRSCALE * 222) / 255, (BRSCALE * 205) / 255})      // Almond - Special states
-#define MOCHA ((onboardled_color_t){(BRSCALE * 191) / 255, (BRSCALE * 154) / 255, (BRSCALE * 107) / 255})       // Mocha - Special states
-#define FUCHSIA ((onboardled_color_t){BRSCALE, 0, BRSCALE})                                                     // Fuchsia - Special states
-#define LILAC ((onboardled_color_t){(BRSCALE * 200) / 255, (BRSCALE * 162) / 255, (BRSCALE * 200) / 255})       // Lilac - Special states
-#define CERULEAN ((onboardled_color_t){(BRSCALE * 42) / 255, (BRSCALE * 82) / 255, (BRSCALE * 190) / 255})      // Cerulean - Special states
-#define PERIWINKLE ((onboardled_color_t){(BRSCALE * 204) / 255, (BRSCALE * 204) / 255, BRSCALE})                // Periwinkle - Special states
-#define MAUVE ((onboardled_color_t){(BRSCALE * 224) / 255, (BRSCALE * 176) / 255, (BRSCALE * 255) / 255})       // Mauve - Special states
-#define RUST ((onboardled_color_t){(BRSCALE * 183) / 255, (BRSCALE * 65) / 255, (BRSCALE * 14) / 255})          // Rust - Special states
-#define BURGUNDY ((onboardled_color_t){(BRSCALE * 128) / 255, 0, (BRSCALE * 32) / 255})                         // Burgundy - Special states
-#define WINE ((onboardled_color_t){(BRSCALE * 114) / 255, 0, (BRSCALE * 47) / 255})                             // Wine - Special states
-#define BRICK ((onboardled_color_t){(BRSCALE * 156) / 255, (BRSCALE * 52) / 255, (BRSCALE * 31) / 255})         // Brick - Special states
-#define CHESTNUT ((onboardled_color_t){(BRSCALE * 205) / 255, (BRSCALE * 92) / 255, (BRSCALE * 92) / 255})      // Chestnut - Special states
-#define SANGRIA ((onboardled_color_t){(BRSCALE * 146) / 255, 0, (BRSCALE * 10) / 255})                          // Sangria - Special states
-#define CRIMSON ((onboardled_color_t){(BRSCALE * 220) / 255, (BRSCALE * 20) / 255, (BRSCALE * 60) / 255})       // Crimson - Special states
+#define SILVER ((onboardled_color_t){(BRLEVEL * 192) / 255, (BRLEVEL * 192) / 255, (BRLEVEL * 192) / 255})      // Silver - Special states
+#define BRONZE ((onboardled_color_t){(BRLEVEL * 205) / 255, (BRLEVEL * 127) / 255, (BRLEVEL * 50) / 255})       // Bronze - Special states
+#define PEACH ((onboardled_color_t){BRLEVEL, (BRLEVEL * 218) / 255, (BRLEVEL * 185) / 255})                     // Peach - Special states
+#define MINT ((onboardled_color_t){(BRLEVEL * 189) / 255, BRLEVEL, (BRLEVEL * 189) / 255})                      // Mint - Special states
+#define CORAL ((onboardled_color_t){BRLEVEL, (BRLEVEL * 127) / 255, (BRLEVEL * 80) / 255})                      // Coral - Special states
+#define SALT_PEPPER ((onboardled_color_t){(BRLEVEL * 220) / 255, (BRLEVEL * 220) / 255, (BRLEVEL * 220) / 255}) // Salt & Pepper - Special states
+#define SKY_BLUE ((onboardled_color_t){(BRLEVEL * 135) / 255, (BRLEVEL * 206) / 255, BRLEVEL})                  // Sky Blue - Special states
+#define LAVENDER ((onboardled_color_t){(BRLEVEL * 230) / 255, (BRLEVEL * 230) / 255, BRLEVEL})                  // Lavender - Special states
+#define BEIGE ((onboardled_color_t){(BRLEVEL * 245) / 255, (BRLEVEL * 245) / 255, (BRLEVEL * 220) / 255})       // Beige - Special states
+#define CREAM ((onboardled_color_t){(BRLEVEL * 255) / 255, (BRLEVEL * 253) / 255, (BRLEVEL * 208) / 255})       // Cream - Special states
+#define PEAR ((onboardled_color_t){(BRLEVEL * 209) / 255, (BRLEVEL * 226) / 255, (BRLEVEL * 49) / 255})         // Pear - Special states
+#define MOSS ((onboardled_color_t){(BRLEVEL * 173) / 255, (BRLEVEL * 223) / 255, (BRLEVEL * 173) / 255})        // Moss - Special states
+#define SAND ((onboardled_color_t){(BRLEVEL * 194) / 255, (BRLEVEL * 178) / 255, (BRLEVEL * 128) / 255})        // Sand - Special states
+#define COCOA ((onboardled_color_t){(BRLEVEL * 210) / 255, (BRLEVEL * 105) / 255, (BRLEVEL * 30) / 255})        // Cocoa - Special states
+#define CHOCOLATE ((onboardled_color_t){(BRLEVEL * 123) / 255, (BRLEVEL * 63) / 255, (BRLEVEL * 0) / 255})      // Chocolate - Special states
+#define TAN ((onboardled_color_t){(BRLEVEL * 210) / 255, (BRLEVEL * 180) / 255, (BRLEVEL * 140) / 255})         // Tan - Special states
+#define PEWTER ((onboardled_color_t){(BRLEVEL * 128) / 255, (BRLEVEL * 128) / 255, (BRLEVEL * 128) / 255})      // Pewter - Special states
+#define SLATE ((onboardled_color_t){(BRLEVEL * 112) / 255, (BRLEVEL * 128) / 255, (BRLEVEL * 144) / 255})       // Slate - Special states
+#define STEEL ((onboardled_color_t){(BRLEVEL * 70) / 255, (BRLEVEL * 130) / 255, (BRLEVEL * 180) / 255})        // Steel - Special states
+#define CHARCOAL ((onboardled_color_t){(BRLEVEL * 54) / 255, (BRLEVEL * 69) / 255, (BRLEVEL * 79) / 255})       // Charcoal - Special states
+#define ASPHALT ((onboardled_color_t){(BRLEVEL * 47) / 255, (BRLEVEL * 79) / 255, (BRLEVEL * 79) / 255})        // Asphalt - Special states
+#define ONYX ((onboardled_color_t){(BRLEVEL * 53) / 255, (BRLEVEL * 56) / 255, (BRLEVEL * 57) / 255})           // Onyx - Special states
+#define EBONY ((onboardled_color_t){(BRLEVEL * 85) / 255, (BRLEVEL * 93) / 255, (BRLEVEL * 80) / 255})          // Ebony - Special states
+#define IVORY ((onboardled_color_t){(BRLEVEL * 255) / 255, (BRLEVEL * 255) / 255, (BRLEVEL * 240) / 255})       // Ivory - Special states
+#define ALMOND ((onboardled_color_t){(BRLEVEL * 239) / 255, (BRLEVEL * 222) / 255, (BRLEVEL * 205) / 255})      // Almond - Special states
+#define MOCHA ((onboardled_color_t){(BRLEVEL * 191) / 255, (BRLEVEL * 154) / 255, (BRLEVEL * 107) / 255})       // Mocha - Special states
+#define FUCHSIA ((onboardled_color_t){BRLEVEL, 0, BRLEVEL})                                                     // Fuchsia - Special states
+#define LILAC ((onboardled_color_t){(BRLEVEL * 200) / 255, (BRLEVEL * 162) / 255, (BRLEVEL * 200) / 255})       // Lilac - Special states
+#define CERULEAN ((onboardled_color_t){(BRLEVEL * 42) / 255, (BRLEVEL * 82) / 255, (BRLEVEL * 190) / 255})      // Cerulean - Special states
+#define PERIWINKLE ((onboardled_color_t){(BRLEVEL * 204) / 255, (BRLEVEL * 204) / 255, BRLEVEL})                // Periwinkle - Special states
+#define MAUVE ((onboardled_color_t){(BRLEVEL * 224) / 255, (BRLEVEL * 176) / 255, (BRLEVEL * 255) / 255})       // Mauve - Special states
+#define RUST ((onboardled_color_t){(BRLEVEL * 183) / 255, (BRLEVEL * 65) / 255, (BRLEVEL * 14) / 255})          // Rust - Special states
+#define BURGUNDY ((onboardled_color_t){(BRLEVEL * 128) / 255, 0, (BRLEVEL * 32) / 255})                         // Burgundy - Special states
+#define WINE ((onboardled_color_t){(BRLEVEL * 114) / 255, 0, (BRLEVEL * 47) / 255})                             // Wine - Special states
+#define BRICK ((onboardled_color_t){(BRLEVEL * 156) / 255, (BRLEVEL * 52) / 255, (BRLEVEL * 31) / 255})         // Brick - Special states
+#define CHESTNUT ((onboardled_color_t){(BRLEVEL * 205) / 255, (BRLEVEL * 92) / 255, (BRLEVEL * 92) / 255})      // Chestnut - Special states
+#define SANGRIA ((onboardled_color_t){(BRLEVEL * 146) / 255, 0, (BRLEVEL * 10) / 255})                          // Sangria - Special states
+#define CRIMSON ((onboardled_color_t){(BRLEVEL * 220) / 255, (BRLEVEL * 20) / 255, (BRLEVEL * 60) / 255})       // Crimson - Special states
 
 // Predefined colors for semantic meaning, with brightness applied
 #define ONBOARDLED_COLOR_OFF (BLACK_OFF)   // Black/Off
@@ -388,12 +388,12 @@ extern "C"
     /**
      * @brief Start a non-blocking smooth breathing pattern with PWM-like brightness control.
      *
-     * Creates a smooth fade-in/fade-out effect by gradually changing brightness from 0 to BRSCALE.
-     * The pattern smoothly transitions between minimum (0) and maximum (BRSCALE) brightness levels
+     * Creates a smooth fade-in/fade-out effect by gradually changing brightness from 0 to BRLEVEL.
+     * The pattern smoothly transitions between minimum (0) and maximum (BRLEVEL) brightness levels
      * using fine-grained brightness steps for a smooth PWM-like breathing effect.
      *
-     * @param fade_in_ms Duration for fade-in transition (0 to BRSCALE brightness)
-     * @param fade_out_ms Duration for fade-out transition (BRSCALE to 0 brightness)
+     * @param fade_in_ms Duration for fade-in transition (0 to BRLEVEL brightness)
+     * @param fade_out_ms Duration for fade-out transition (BRLEVEL to 0 brightness)
      * @param pause_ms Pause duration at minimum brightness between cycles
      * @param cycles Number of breathing cycles (0 = infinite)
      * @param color Pointer to RGB color (NULL = default blue for breathing)

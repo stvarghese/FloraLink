@@ -504,6 +504,8 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
                 nodeio_send_connect_response(client_fd, seq_num);
                 // Trigger initial subscription update
                 node_contexts[node_id].subscription_update = true;
+                // Wakeup on valid connect request
+                modemanager_notify_activity_auto();
             }
             cJSON_Delete(root);
             return;
@@ -541,12 +543,13 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
                 cJSON_Delete(root);
                 return;
             }
-            // Reset/extend active window on valid node data (auto sleep version)
-            modemanager_notify_activity_auto();
         }
     }
 #include "modemanager.h"
     cJSON_Delete(root);
+
+    // Reset/extend active window on valid message from node
+    modemanager_notify_activity_auto();
 
     // 3. Store/update node state, sensor values, etc.
     //    Example: update a struct or database with the latest info from this node

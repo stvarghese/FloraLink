@@ -235,3 +235,22 @@ window.addEventListener('DOMContentLoaded', setupNodesPolling);
 // Keep footer ticking too
 updateFooter();
 setInterval(updateFooter, 1000);
+
+// Light sleep banner updater
+function updateSleepBanner() {
+    try {
+        fetch('/sleepstatus')
+            .then(r => r.json())
+            .then(j => {
+                const banner = document.getElementById('sleepBanner');
+                if (!banner) return;
+                if (j && j.light_sleep) {
+                    banner.style.display = 'block';
+                } else {
+                    banner.style.display = 'none';
+                }
+            }).catch(() => { /* ignore */ });
+    } catch (_) { /* ignore */ }
+}
+updateSleepBanner();
+setInterval(updateSleepBanner, 1000);

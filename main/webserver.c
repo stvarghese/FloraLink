@@ -25,6 +25,8 @@ volatile int g_is_light_sleep = 0;
 // HTTP GET handler for /nodeslist
 static esp_err_t nodeslist_get_handler(httpd_req_t *req)
 {
+    // Any HTTP request signifies user activity; extend ACTIVE window
+    modemanager_notify_activity_auto();
     HEAP_TRACE_START("NODESLIST");
 
     char *json = (char *)malloc(2048);
@@ -60,6 +62,7 @@ static esp_err_t nodeslist_get_handler(httpd_req_t *req)
 // HTTP GET handler for /stats
 static esp_err_t stats_get_handler(httpd_req_t *req)
 {
+    modemanager_notify_activity_auto();
     // If browser requests with Accept: text/html, serve a simple stats page
     char accept_hdr[64] = {0};
     if (httpd_req_get_hdr_value_str(req, "Accept", accept_hdr, sizeof(accept_hdr)) == ESP_OK && strstr(accept_hdr, "text/html"))
@@ -104,6 +107,7 @@ static esp_err_t stats_get_handler(httpd_req_t *req)
 /* HTTP GET handler for /configure */
 static esp_err_t configure_get_handler(httpd_req_t *req)
 {
+    modemanager_notify_activity_auto();
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     SEND_HTML_CHUNK("<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Configure</title><meta name='viewport' content='width=device-width,initial-scale=1'>");
     SEND_HTML_CHUNK("<link rel='stylesheet' href='/main.css'>");
@@ -136,6 +140,7 @@ static esp_err_t configure_get_handler(httpd_req_t *req)
 // HTTP GET handler for /nodes
 static esp_err_t nodes_get_handler(httpd_req_t *req)
 {
+    modemanager_notify_activity_auto();
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     SEND_HTML_CHUNK("<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Nodes</title><meta name='viewport' content='width=device-width,initial-scale=1'>");
     SEND_HTML_CHUNK("<link rel='stylesheet' href='/main.css'>");
@@ -157,6 +162,7 @@ static esp_err_t nodes_get_handler(httpd_req_t *req)
 /* HTTP POST handler for /configure */
 static esp_err_t configure_post_handler(httpd_req_t *req)
 {
+    modemanager_notify_activity_auto();
     char buf[64];
     int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (ret <= 0)
@@ -192,6 +198,7 @@ static esp_err_t configure_post_handler(httpd_req_t *req)
 // Handler to serve main.css
 static esp_err_t css_get_handler(httpd_req_t *req)
 {
+    modemanager_notify_activity_auto();
     size_t css_len = webpage_main_css_end - webpage_main_css_start;
     httpd_resp_set_type(req, "text/css");
     httpd_resp_send(req, (const char *)webpage_main_css_start, css_len);
@@ -201,6 +208,7 @@ static esp_err_t css_get_handler(httpd_req_t *req)
 // Handler to serve main.js
 static esp_err_t js_get_handler(httpd_req_t *req)
 {
+    modemanager_notify_activity_auto();
     size_t js_len = webpage_main_js_end - webpage_main_js_start;
     httpd_resp_set_type(req, "application/javascript");
     httpd_resp_send(req, (const char *)webpage_main_js_start, js_len);
@@ -209,15 +217,10 @@ static esp_err_t js_get_handler(httpd_req_t *req)
 
 static esp_err_t index_get_handler(httpd_req_t *req)
 {
+    modemanager_notify_activity_auto();
     const char *ssid = wifi_get_ssid();
     ESP_LOGI("WebServer", "SSID for HTML injection: '%s'", ssid ? ssid : "(null)");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-
-    // Show light sleep status if active
-    if (g_is_light_sleep)
-    {
-        SEND_HTML_CHUNK("<div style='color:#d32f2f;font-weight:bold;text-align:center;margin-bottom:8px;'>On light sleep</div>");
-    }
     // Send static HTML in flash-resident chunks (saves needing a 4KB RAM buffer)
     SEND_HTML_CHUNK("<!DOCTYPE html><html><head><meta charset='UTF-8'><title>FloraLink.Hub</title>");
     SEND_HTML_CHUNK("<meta name='viewport' content='width=device-width,initial-scale=1'>");
@@ -247,6 +250,22 @@ static esp_err_t index_get_handler(httpd_req_t *req)
                     "        <a href='/nodes'>Nodes</a>\n"
                     "        <div class='tab-underline'></div>\n"
                     "    </nav>");
+    // Insert a banner element that JS can toggle without reload
+    {
+        char sbuf[192];
+        const char *disp = g_is_light_sleep ? "block" : "none";
+        int n2 = snprintf(sbuf, sizeof(sbuf),
+                          "<div id='sleepBanner' style='display:%s;color:#d32f2f;font-weight:bold;text-align:center;margin:8px 0;'>On light sleep</div>",
+                          disp);
+        if (n2 > 0 && n2 < (int)sizeof(sbuf))
+        {
+            SEND_HTML_CHUNK(sbuf);
+        }
+        else
+        {
+            SEND_HTML_CHUNK("<div id='sleepBanner' style='display:none;color:#d32f2f;font-weight:bold;text-align:center;margin:8px 0;'>On light sleep</div>");
+        }
+    }
     SEND_HTML_CHUNK("<h1>FloraLink.Hub</h1><div class='distance-label'>Current Distance:</div>");
     SEND_HTML_CHUNK("<div id='distance'>--</div><div id='error'></div>");
     SEND_HTML_CHUNK("<button id='statsBtn' onclick='toggleStats()'>Show Device Stats</button>");
@@ -264,6 +283,24 @@ static esp_err_t index_get_handler(httpd_req_t *req)
         ESP_LOGE("WebServer", "final chunk termination failed (%s)", esp_err_to_name(te));
         return te;
     }
+    return ESP_OK;
+}
+
+// Lightweight endpoint to expose current light sleep state without extending ACTIVE
+static esp_err_t sleepstatus_get_handler(httpd_req_t *req)
+{
+    // Intentionally DO NOT call modemanager_notify_activity_auto() here, to avoid extending ACTIVE window
+    char resp[64];
+    int is_sleep = g_is_light_sleep ? 1 : 0;
+    int n = snprintf(resp, sizeof(resp), "{\"light_sleep\":%d}\n", is_sleep);
+    if (n < 0)
+    {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
@@ -353,6 +390,11 @@ esp_err_t webserver_init(void)
         .method = HTTP_GET,
         .handler = nodeslist_get_handler,
         .user_ctx = NULL};
+    httpd_uri_t sleepstatus_uri = {
+        .uri = "/sleepstatus",
+        .method = HTTP_GET,
+        .handler = sleepstatus_get_handler,
+        .user_ctx = NULL};
 
     // Static assets
     httpd_uri_t css_uri = {
@@ -385,6 +427,7 @@ esp_err_t webserver_init(void)
     httpd_register_uri_handler(server, &distance_uri);
     httpd_register_uri_handler(server, &configure_post_uri);
     httpd_register_uri_handler(server, &nodeslist_uri);
+    httpd_register_uri_handler(server, &sleepstatus_uri);
 
     // Static assets
     httpd_register_uri_handler(server, &css_uri);

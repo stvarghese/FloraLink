@@ -171,8 +171,10 @@ typedef struct
     uint32_t fade_out_ms;
     uint32_t pause_ms;
     uint32_t breathing_step_ms; // Time per brightness step
-    uint8_t current_brightness; // Current brightness level (0 to BRSCALE)
+    uint8_t current_brightness; // Current brightness level (0 to BRLEVEL)
     uint8_t target_brightness;  // Target brightness for current phase
+    uint32_t breathing_steps;   // Total number of steps for fade (independent of BRLEVEL)
+    uint32_t current_step;      // Current step in the fade (0 to breathing_steps)
 
     // Color for the pattern
     onboardled_color_t color;
@@ -339,59 +341,75 @@ static void pattern_timer_callback(void *arg)
 
     case PATTERN_BREATHING:
     {
-        onboardled_color_t scaled_color;
+        onboardled_color_t currstepbrightness;
 
         switch (s_pattern_ctx.state)
         {
         case PATTERN_STATE_FADE_IN:
-            // Scale the color by current brightness
-            scaled_color.r = (s_pattern_ctx.color.r * s_pattern_ctx.current_brightness) / BRSCALE;
-            scaled_color.g = (s_pattern_ctx.color.g * s_pattern_ctx.current_brightness) / BRSCALE;
-            scaled_color.b = (s_pattern_ctx.color.b * s_pattern_ctx.current_brightness) / BRSCALE;
+            // Calculate interpolated brightness: 0 to BRLEVEL over breathing_steps
+            s_pattern_ctx.current_brightness = (s_pattern_ctx.current_step * BRLEVEL) / s_pattern_ctx.breathing_steps;
+
+            // Scale the configured color by current brightness (preserve hue)
+            {
+                uint8_t br = s_pattern_ctx.current_brightness;
+                // scale and round to nearest integer
+                currstepbrightness.r = (uint8_t)((s_pattern_ctx.color.r * br + (BRLEVEL / 2)) / BRLEVEL);
+                currstepbrightness.g = (uint8_t)((s_pattern_ctx.color.g * br + (BRLEVEL / 2)) / BRLEVEL);
+                currstepbrightness.b = (uint8_t)((s_pattern_ctx.color.b * br + (BRLEVEL / 2)) / BRLEVEL);
+            }
 
             if (s_pattern_ctx.current_brightness > 0)
             {
-                onboardled_write_color(true, scaled_color);
+                onboardled_write_color(true, currstepbrightness);
             }
             else
             {
-                onboardled_write_color(false, scaled_color);
+                onboardled_write_color(false, currstepbrightness);
             }
 
-            // Increment brightness
-            s_pattern_ctx.current_brightness++;
+            // Increment step
+            s_pattern_ctx.current_step++;
 
-            if (s_pattern_ctx.current_brightness >= BRSCALE)
+            if (s_pattern_ctx.current_step > s_pattern_ctx.breathing_steps)
             {
                 // Fade in complete, switch to fade out
                 s_pattern_ctx.state = PATTERN_STATE_FADE_OUT;
-                s_pattern_ctx.current_brightness = BRSCALE;
+                s_pattern_ctx.current_step = s_pattern_ctx.breathing_steps; // Start fade out from max
+                s_pattern_ctx.current_brightness = BRLEVEL;
             }
 
             next_delay_ms = s_pattern_ctx.breathing_step_ms;
             break;
 
         case PATTERN_STATE_FADE_OUT:
-            // Scale the color by current brightness
-            scaled_color.r = (s_pattern_ctx.color.r * s_pattern_ctx.current_brightness) / BRSCALE;
-            scaled_color.g = (s_pattern_ctx.color.g * s_pattern_ctx.current_brightness) / BRSCALE;
-            scaled_color.b = (s_pattern_ctx.color.b * s_pattern_ctx.current_brightness) / BRSCALE;
+            // Calculate interpolated brightness: BRLEVEL to 0 over breathing_steps
+            s_pattern_ctx.current_brightness = (s_pattern_ctx.current_step * BRLEVEL) / s_pattern_ctx.breathing_steps;
+
+            // Scale the configured color by current brightness (preserve hue)
+            {
+                // scale and round to nearest integer
+                uint8_t br = s_pattern_ctx.current_brightness;
+                currstepbrightness.r = (uint8_t)((s_pattern_ctx.color.r * br + (BRLEVEL / 2)) / BRLEVEL);
+                currstepbrightness.g = (uint8_t)((s_pattern_ctx.color.g * br + (BRLEVEL / 2)) / BRLEVEL);
+                currstepbrightness.b = (uint8_t)((s_pattern_ctx.color.b * br + (BRLEVEL / 2)) / BRLEVEL);
+            }
 
             if (s_pattern_ctx.current_brightness > 0)
             {
-                onboardled_write_color(true, scaled_color);
+                onboardled_write_color(true, currstepbrightness);
             }
             else
             {
-                onboardled_write_color(false, scaled_color);
+                onboardled_write_color(false, currstepbrightness);
             }
 
-            // Decrement brightness
-            s_pattern_ctx.current_brightness--;
+            // Decrement step
+            s_pattern_ctx.current_step--;
 
-            if (s_pattern_ctx.current_brightness == 0)
+            if (s_pattern_ctx.current_step == 0)
             {
                 // Fade out complete
+                s_pattern_ctx.current_brightness = 0;
                 if (s_pattern_ctx.pause_ms > 0)
                 {
                     s_pattern_ctx.state = PATTERN_STATE_PAUSE;
@@ -404,7 +422,7 @@ static void pattern_timer_callback(void *arg)
                     if (s_pattern_ctx.count == 0 || s_pattern_ctx.current_count < s_pattern_ctx.count)
                     {
                         s_pattern_ctx.state = PATTERN_STATE_FADE_IN;
-                        s_pattern_ctx.current_brightness = 0;
+                        s_pattern_ctx.current_step = 0;
                         next_delay_ms = s_pattern_ctx.breathing_step_ms;
                     }
                     else
@@ -428,6 +446,7 @@ static void pattern_timer_callback(void *arg)
             if (s_pattern_ctx.count == 0 || s_pattern_ctx.current_count < s_pattern_ctx.count)
             {
                 s_pattern_ctx.state = PATTERN_STATE_FADE_IN;
+                s_pattern_ctx.current_step = 0;
                 s_pattern_ctx.current_brightness = 0;
                 next_delay_ms = s_pattern_ctx.breathing_step_ms;
             }
@@ -849,8 +868,10 @@ bool onboardled_start_breathing(uint32_t fade_in_ms, uint32_t fade_out_ms, uint3
         return false;
     }
 
-    // Calculate step timing for smooth breathing (aim for ~50 steps for smooth fade)
-    uint32_t steps = BRSCALE; // Use BRSCALE steps for maximum smoothness
+    // Configure number of steps for smooth breathing (independent of BRLEVEL)
+    uint32_t steps = 50; // Use 50 steps for maximum smoothness regardless of BRLEVEL
+
+    // Calculate step timing based on desired fade durations
     uint32_t fade_in_step_ms = fade_in_ms / steps;
     uint32_t fade_out_step_ms = fade_out_ms / steps;
 
@@ -871,13 +892,15 @@ bool onboardled_start_breathing(uint32_t fade_in_ms, uint32_t fade_out_ms, uint3
     s_pattern_ctx.fade_out_ms = fade_out_ms;
     s_pattern_ctx.pause_ms = pause_ms;
     s_pattern_ctx.breathing_step_ms = step_ms;
+    s_pattern_ctx.breathing_steps = steps;
+    s_pattern_ctx.current_step = 0;
     s_pattern_ctx.current_brightness = 0;
-    s_pattern_ctx.target_brightness = BRSCALE;
+    s_pattern_ctx.target_brightness = BRLEVEL;
 
     s_pattern_ctx.is_running = true;
 
     // Start with minimum brightness (off)
-    onboardled_write_color(false, s_pattern_ctx.color);
+    onboardled_write_color(false, (onboardled_color_t){0, 0, 0});
 
     // Start the timer
     ESP_ERROR_CHECK(esp_timer_start_once(s_pattern_ctx.timer, s_pattern_ctx.breathing_step_ms * 1000));

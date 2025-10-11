@@ -7,6 +7,7 @@
 #include "commonutils.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <esp_log.h>
 #include <esp_http_server.h>
 #include "monitor.h"
@@ -156,6 +157,52 @@ static esp_err_t nodes_get_handler(httpd_req_t *req)
     SEND_HTML_CHUNK("<div id='nodesPanel'>Loading...</div>");
     SEND_HTML_CHUNK("</div></body></html>");
     httpd_resp_sendstr_chunk(req, NULL);
+    return ESP_OK;
+}
+
+// HTTP POST handler for /subscribe (apply per-node subscription from UI)
+static esp_err_t subscribe_post_handler(httpd_req_t *req)
+{
+    modemanager_notify_activity_auto();
+    char buf[96];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0)
+    {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+    // Expected form body: node_id=<n>&mask=<hex or dec>&interval_ms=<n>
+    uint32_t node_id = 0, interval_ms = 0;
+    unsigned long mask = 0;
+    // very small parser: look for substrings
+    char *p;
+    p = strstr(buf, "node_id=");
+    if (p)
+        node_id = (uint32_t)atoi(p + 8);
+    p = strstr(buf, "mask=");
+    if (p)
+    {
+        // support hex starting with 0x
+        if (p[5] == '0' && (p[6] == 'x' || p[6] == 'X'))
+            mask = strtoul(p + 5, NULL, 16);
+        else
+            mask = strtoul(p + 5, NULL, 10);
+    }
+    p = strstr(buf, "interval_ms=");
+    if (p)
+        interval_ms = (uint32_t)atoi(p + 12);
+
+    esp_err_t err = nodeio_update_subscription((uint8_t)node_id, (capability_t)mask, interval_ms);
+    if (err != ESP_OK)
+    {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false}\n");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}\n");
     return ESP_OK;
 }
 
@@ -390,6 +437,11 @@ esp_err_t webserver_init(void)
         .method = HTTP_GET,
         .handler = nodeslist_get_handler,
         .user_ctx = NULL};
+    httpd_uri_t subscribe_post_uri = {
+        .uri = "/subscribe",
+        .method = HTTP_POST,
+        .handler = subscribe_post_handler,
+        .user_ctx = NULL};
     httpd_uri_t sleepstatus_uri = {
         .uri = "/sleepstatus",
         .method = HTTP_GET,
@@ -428,6 +480,7 @@ esp_err_t webserver_init(void)
     httpd_register_uri_handler(server, &configure_post_uri);
     httpd_register_uri_handler(server, &nodeslist_uri);
     httpd_register_uri_handler(server, &sleepstatus_uri);
+    httpd_register_uri_handler(server, &subscribe_post_uri);
 
     // Static assets
     httpd_register_uri_handler(server, &css_uri);

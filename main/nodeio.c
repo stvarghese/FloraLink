@@ -63,23 +63,22 @@ static uint32_t node_local_seq[MAX_NODES] = {0};
 // Function declarations
 static inline msg_type_t nodeio_type_str_to_enum(const char *type_str);
 static inline esp_err_t nodeio_parse_message_payload(cJSON *root, capability_t node_cap_mask, protocol_msg_t *p_currentmsg);
-static inline capability_t nodeio_build_node_capmask(cJSON *sensors_array);
 static void nodeio_handle_message(int client_fd, const char *data, size_t len);
-static void nodeio_send_response(int client_fd, const char *response, size_t len);
-static void nodeio_broadcast(const char *message, size_t len);
+static void nodeio_send_response(int client_fd, const char *response, size_t len) __attribute__((unused));
+static void nodeio_broadcast(const char *message, size_t len) __attribute__((unused));
 static void nodeio_subscribe_to_node(int client_fd, const subscribe_config_t *config);
 static void nodeio_unsubscribe_from_node(int client_fd);
-static void nodeio_request_ota(int client_fd, const ota_request_t *ota);
-static void nodeio_report_ota_status(int client_fd, const ota_status_t *status);
+static void nodeio_request_ota(int client_fd, const ota_request_t *ota) __attribute__((unused));
+static void nodeio_report_ota_status(int client_fd, const ota_status_t *status) __attribute__((unused));
 static void nodeio_send_connect_response(int client_fd, uint32_t seq_num);
 static void nodeio_send_error(int client_fd, const char *error_msg);
-static void nodeio_process_diagnostic(int client_fd, const char *diag_info);
-static void nodeio_request_diagnostic(int client_fd);
+static void nodeio_process_diagnostic(int client_fd, const char *diag_info) __attribute__((unused));
+static void nodeio_request_diagnostic(int client_fd) __attribute__((unused));
 static void nodeio_handle_disconnect(int client_fd, uint8_t node_id);
 static node_params_t *nodeio_handle_connect(int client_fd, uint8_t node_id, cJSON *root);
 static void nodeio_handle_error(int client_fd, const char *error_msg);
-static void nodeio_handle_timeout(int client_fd);
-static void nodeio_handle_heartbeat(int client_fd);
+static void nodeio_handle_timeout(int client_fd) __attribute__((unused));
+static void nodeio_handle_heartbeat(int client_fd) __attribute__((unused));
 static void nodeio_on_close(int client_fd);
 static void nodeio_on_message(int client_fd, const char *data, size_t len);
 
@@ -361,7 +360,7 @@ static inline esp_err_t nodeio_parse_message_payload(cJSON *root, capability_t n
 static void nodeio_handle_message(int client_fd, const char *data, size_t len)
 {
     HEAP_TRACE_START("NODEIO");
-    bool is_valid = false;
+    // bool is_valid = false;
 
     // ESP_LOGD(TAG, "Received message: %s, length: %u", data, len);
     // // 1. Copy and null-terminate the data
@@ -703,18 +702,47 @@ void nodeio_process_subscription_updates(void)
         {
             continue; // Skip if no node or session
         }
-
-        // TODO: get sub config from web UI or other source
-        subscribe_config_t sub_config = {
-            .subscribe_mask = node_contexts[i].p_node->capability_mask, // Example: subscribe to all available sensors/services from node
-            .interval_ms = 5000                                         // Example: 5 seconds interval
-        };
-        // Trigger subscription update
-        // ESP_LOGI(TAG, "Processing subscription update for node id: %d", i);
-        nodeio_subscribe_to_node(node_contexts[i].p_node->node_id, &sub_config);
+        // If there's a pending update flag, push the stored subscription to the node
+        if (node_contexts[i].subscription_update)
+        {
+            // Clamp subscribe_mask to the node's capability so we don't request unsupported items
+            capability_t mask = node_contexts[i].subscription.subscribe_mask & node_contexts[i].p_node->capability_mask;
+            subscribe_config_t sub_config = {
+                .subscribe_mask = mask,
+                .interval_ms = node_contexts[i].subscription.interval_ms ? node_contexts[i].subscription.interval_ms : 5000};
+            // If mask is zero, treat as unsubscribe (send null config)
+            if (sub_config.subscribe_mask == 0)
+            {
+                nodeio_subscribe_to_node(node_contexts[i].p_node->node_id, NULL);
+            }
+            else
+            {
+                nodeio_subscribe_to_node(node_contexts[i].p_node->node_id, &sub_config);
+            }
+        }
     }
 
     HEAP_TRACE_END_DEFAULT();
+}
+
+// Public API: set subscription from Web UI and mark for update
+esp_err_t nodeio_update_subscription(uint8_t node_id, capability_t subscribe_mask, uint32_t interval_ms)
+{
+    if (node_id >= MAX_NODES)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    node_context_t *ctx = &node_contexts[node_id];
+    if (!ctx->p_node || !ctx->p_session || !ctx->p_session->connected)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    ctx->subscription.subscribe_mask = subscribe_mask;
+    ctx->subscription.interval_ms = interval_ms;
+    ctx->subscription_update = true; // trigger sending on next processing tick
+    ctx->subscribed = (subscribe_mask != 0);
+    ESP_LOGI(TAG, "UI subscription update for node %u: mask=0x%08X, interval=%u ms", (unsigned)node_id, (unsigned)subscribe_mask, (unsigned)interval_ms);
+    return ESP_OK;
 }
 
 static void nodeio_unsubscribe_from_node(int client_fd)
@@ -974,7 +1002,8 @@ void nodeio_monitor_nodeslist(void)
                 {
                     if (node_contexts[i].p_msg->payload.data[j].current_cap_mask & sensor_table[s].cap)
                     {
-                        float *pval = (float *)((uint8_t *)&node_contexts[i].p_msg->payload.data[j].datafields.sensor + sensor_table[s].offset);
+                        volatile float *pval = (float *)((uint8_t *)&node_contexts[i].p_msg->payload.data[j].datafields.sensor + sensor_table[s].offset);
+                        (void)pval; // silence when logging disabled
                         // ESP_LOGI(TAG, "Node %d sensor payload: %s: %.2f", i, sensor_table[s].name, *pval);
                     }
                 }
@@ -1056,12 +1085,15 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
             // Map backend fields to frontend expectations
             const char *status = "Online";
             int uptime_s = (int)uptime;
-            float temp = 0, humid = 0, batt = 0, moisture = 0;
-            int has_temp = 0, has_humid = 0, has_batt = 0, has_moisture = 0;
+            // placeholders reserved for extended summaries (not used in JSON path)
 
+            // include capability mask and current subscription state for UI configuration
             offset += snprintf(json + offset, json_size - offset,
-                               "{\"id\":%d,\"status\":\"%s\",\"uptime_s\":%d,",
-                               ctx->p_node->node_id, status, uptime_s);
+                               "{\"id\":%d,\"status\":\"%s\",\"uptime_s\":%d,\"cap_mask\":%u,\"sub\":{\"mask\":%u,\"interval_ms\":%u},",
+                               ctx->p_node->node_id, status, uptime_s,
+                               (unsigned)ctx->p_node->capability_mask,
+                               (unsigned)ctx->subscription.subscribe_mask,
+                               (unsigned)ctx->subscription.interval_ms);
 
             // Sensors: output all available from sensor_table
             int first_sensor = 1;

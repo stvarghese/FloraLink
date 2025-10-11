@@ -97,10 +97,17 @@ function fetchStats() {
     }).catch(() => {/* ignore */ });
 }
 
+// Track open config panels per node
+window.configPanelsOpen = {};
+
 // Nodes panel
 function fetchNodes() {
     const panel = document.getElementById('nodesPanel');
     if (!panel) return;
+
+    // Skip refresh if any config panels are open
+    if (Object.values(window.configPanelsOpen).some(Boolean)) return;
+
     loadPersistedState();
     fetch('/nodeslist')
         .then(r => r.json())
@@ -165,6 +172,7 @@ function fetchNodes() {
             const battIcon = '<span class="icon" style="font-size:1.2em">🔋</span>';
             const moistIcon = '<span class="icon" style="font-size:1.2em">🪴</span>';
             let html = '';
+            let hasOffline = false;
 
             combined.forEach(node => {
                 const nt = window.nodeTimes[node.id] || {};
@@ -182,11 +190,19 @@ function fetchNodes() {
                 const lastSeen = !online && lastSeenTs ? formatDateTime(lastSeenTs) : '-';
                 const lastUptime = !online && nt.lastUptime ? formatUptime(nt.lastUptime) : '-';
 
-                html += `<div class='${cardClass}'>`;
+                if (!online) hasOffline = true;
+
+                html += `<div class='${cardClass}' data-nodeid='${node.id}'>`;
                 html += `<div class='node-title'>Node: <span class='node-id'>${node.id ?? '-'}</span></div>`;
                 if (online) {
-                    html += `<div class='node-status online'>Online</div>`;
-                    html += `<div class='node-info'>`;
+                    // Show special status and grey out sensors if config panel is open for this node
+                    if (window.configPanelsOpen[node.id]) {
+                        html += `<div class='node-status online' style='color:#1976d2'>Online - waiting to reconfigure...</div>`;
+                        html += `<div class='node-info' style='opacity:0.5; pointer-events:none;'>`;
+                    } else {
+                        html += `<div class='node-status online'>Online</div>`;
+                        html += `<div class='node-info'>`;
+                    }
                     html += `<span class=\"sensor\">${tempIcon}<span>${(node.temperature ?? '-') + (node.temperature != null ? '°C' : '')}</span></span>`;
                     html += ` <span class=\"sensor\">${humidIcon}<span>${(node.humidity ?? '-') + (node.humidity != null ? '%' : '')}</span></span>`;
                     const battVal = (node.battery !== undefined ? node.battery : (node.batt !== undefined ? node.batt : null));
@@ -199,16 +215,154 @@ function fetchNodes() {
                     html += `<div class='node-lastseen'>Last seen: <span style='color:#d32f2f'>${lastSeen}</span></div>`;
                     html += `<div class='node-uptime'>Last Uptime: ${lastUptime}</div>`;
                 }
+                if (online) {
+                    // Configure expander
+                    html += `<button class='node-config-toggle' data-node='${node.id}'>Configure</button>`;
+                    // Inline config panel (hidden by default)
+                    const capMask = Number(node.cap_mask || 0);
+                    const subMask = Number(node.sub && node.sub.mask ? node.sub.mask : 0);
+                    const intval = Math.round(Number(node.sub && node.sub.interval_ms ? node.sub.interval_ms : 5000) / 1000); // seconds
+                    // Build checkbox lists dynamically from known bit positions (must match firmware enum)
+                    const caps = [
+                        { bit: 0, name: 'Temperature' },
+                        { bit: 1, name: 'Moisture' },
+                        { bit: 2, name: 'Humidity' },
+                        { bit: 3, name: 'Distance' },
+                        { bit: 4, name: 'Light' },
+                        { bit: 7, name: 'Diagnostics', service: true },
+                        { bit: 8, name: 'OTA', service: true }
+                    ];
+                    let sensorsHtml = '';
+                    let servicesHtml = '';
+                    caps.forEach(c => {
+                        const bitMask = (1 << c.bit) >>> 0;
+                        if (!(capMask & bitMask)) return; // skip unsupported
+                        const checked = (subMask & bitMask) ? 'checked' : '';
+                        const item = `<label><input class='cap-checkbox' data-node='${node.id}' data-bit='${c.bit}' type='checkbox' ${checked}> ${c.name}</label>`;
+                        if (c.service) servicesHtml += item; else sensorsHtml += item;
+                    });
+                    const maskHex = '0x' + (subMask >>> 0).toString(16);
+                    html += `<div class='node-config' id='cfg-${node.id}'>
+                               <div class='cap-groups'>
+                                 <div>
+                                   <div class='cap-group-title'>Sensors:</div>
+                                   <div class='cap-list'>${sensorsHtml || '<span style="color:#888">None</span>'}</div>
+                                 </div>
+                                 <div>
+                                   <div class='cap-group-title'>Services:</div>
+                                   <div class='cap-list'>${servicesHtml || '<span style="color:#888">None</span>'}</div>
+                                 </div>
+                               </div>
+                               <label>Data Interval (s): <input class='interval-input' type='number' min='1' max='60' step='1' value='${intval}' data-node='${node.id}'></label>
+                               <div class='mask-row'>Mask: <span id='mask-${node.id}'>${maskHex}</span></div>
+                               <button class='apply-sub' data-node='${node.id}'>Apply</button>
+                             </div>`;
+                }
                 html += `</div>`;
             });
 
             panel.innerHTML = html;
+            // Add clear offline button if needed
+            if (hasOffline) {
+                html += `<button id='clearOfflineBtn' style='margin:18px auto 0 auto; display:block; background:#e3eaf3; color:#1976d2; border-radius:6px; border:none; font-size:0.98em; padding:7px 18px; box-shadow:0 1px 4px #0001; cursor:pointer;'>Clear offline cards</button>`;
+            }
+            panel.innerHTML = html;
+
+            // Wire up toggles and live mask computation
+            panel.querySelectorAll('.node-config-toggle').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const id = btn.getAttribute('data-node');
+                    const cfg = document.getElementById('cfg-' + id);
+                    if (cfg) {
+                        const isOpening = cfg.style.display !== 'block';
+                        cfg.style.display = isOpening ? 'block' : 'none';
+                        // Track open/close per node
+                        window.configPanelsOpen[id] = isOpening;
+                        // Immediately re-render node cards to update status and sensor area
+                        fetchNodes();
+                    }
+                });
+            });
+
+            const recomputeMask = (nodeId) => {
+                const boxes = panel.querySelectorAll(`.cap-checkbox[data-node='${nodeId}']`);
+                let mask = 0 >>> 0;
+                boxes.forEach(b => { if (b.checked) { const bit = parseInt(b.getAttribute('data-bit'), 10); mask = (mask | (1 << bit)) >>> 0; } });
+                const span = document.getElementById('mask-' + nodeId);
+                if (span) span.textContent = '0x' + (mask >>> 0).toString(16);
+                return mask >>> 0;
+            };
+
+            panel.querySelectorAll('.cap-checkbox').forEach(cb => {
+                cb.addEventListener('change', () => {
+                    const id = cb.getAttribute('data-node');
+                    recomputeMask(id);
+                });
+            });
+
+            panel.querySelectorAll('.apply-sub').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const id = btn.getAttribute('data-node');
+                    const mask = recomputeMask(id);
+                    const intervalEl = panel.querySelector(`.interval-input[data-node='${id}']`);
+                    const intervalSec = intervalEl ? parseInt(intervalEl.value || '5', 10) : 5;
+                    const intervalMs = intervalSec * 1000;
+                    const body = `node_id=${encodeURIComponent(id)}&mask=${mask}&interval_ms=${intervalMs}`;
+                    fetch('/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body })
+                        .then(r => r.json()).then(_ => {
+                            // collapse panel and allow refresh
+                            const cfg = document.getElementById('cfg-' + id);
+                            if (cfg) cfg.style.display = 'none';
+                            window.configPanelsOpen[id] = false;
+                            // trigger immediate refresh
+                            fetchNodes();
+                        }).catch(() => {/* ignore */ });
+                });
+            });
+
+            // Wire up clear offline button
+            const clearBtn = panel.querySelector('#clearOfflineBtn');
+            if (clearBtn) {
+                clearBtn.addEventListener('click', () => {
+                    // Remove offline nodes from state and persisted storage BEFORE animation
+                    for (const idStr of Object.keys(window.knownNodes)) {
+                        const id = parseInt(idStr, 10);
+                        const node = window.knownNodes[id];
+                        if (node && node.status === 'Offline') {
+                            delete window.knownNodes[id];
+                            delete window.nodeTimes[id];
+                        }
+                    }
+                    savePersistedState();
+                    // Find all offline cards
+                    const offlineCards = Array.from(panel.querySelectorAll('.node-card.offline'));
+                    let i = 0;
+                    function swipeNext() {
+                        if (i >= offlineCards.length) {
+                            setTimeout(fetchNodes, 400); // Wait for animation to finish
+                            return;
+                        }
+                        const card = offlineCards[i];
+                        card.classList.add('swipe-away');
+                        setTimeout(() => {
+                            card.remove();
+                            i++;
+                            swipeNext();
+                        }, 120);
+                    }
+                    swipeNext();
+                });
+            }
+
             savePersistedState();
         })
         .catch(() => {
             panel.textContent = 'Failed to load node data.';
         });
 }
+
+// Helper function to update the global flag based on visible config panels
+// No longer needed: configPanelsOpen is now per-node
 
 function formatUptime(seconds) {
     seconds = Math.floor(seconds);
@@ -217,6 +371,7 @@ function formatUptime(seconds) {
     let s = seconds % 60;
     return `${h}h ${m}m ${s}s`;
 }
+
 function formatDateTime(dt) {
     let d = new Date(dt);
     if (isNaN(d)) return String(dt);

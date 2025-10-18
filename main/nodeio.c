@@ -3,9 +3,12 @@
 #include "modemanager.h"
 #include "esp_log.h"
 #include "nodeioprotocol.h"
+#include "nodeio_services.h"
+#include "nodeio_sensors.h"
 #include "cJSON.h"
 #include "commonutils.h"
 #include <time.h>
+#include <stddef.h>
 
 // Maximum num of nodes shall be equal to the maximum number of sessions
 #define MAX_NODES MAX_SESSIONS
@@ -33,15 +36,17 @@ typedef struct
     size_t offset;
 } sensor_lookup_t;
 
-static const sensor_lookup_t sensor_table[] = {
+const sensor_lookup_t sensor_table[] = {
     /* Sensor Name   Capability Mask   Offset within sensor_payload_t */
     {"temperature", CAP_TEMP, offsetof(sensor_payload_t, temp)},
     {"moisture", CAP_MOISTURE, offsetof(sensor_payload_t, moisture)},
     {"humidity", CAP_HUMIDITY, offsetof(sensor_payload_t, humidity)},
     {"distance", CAP_DISTANCE, offsetof(sensor_payload_t, distance)},
-    {"light", CAP_LIGHTSENSE, offsetof(sensor_payload_t, light)},
+    {"light", CAP_LIGHTSENSE, offsetof(sensor_payload_t, light)}
     // Add more sensor types as needed
 };
+
+// Unified LUTs for sensors/services are now private to their helper modules
 
 // Service lookup table for dynamic service filter
 typedef struct
@@ -51,9 +56,9 @@ typedef struct
     size_t offset;
 } service_lookup_t;
 
-static const service_lookup_t service_table[] = {
+const service_lookup_t service_table[] = {
     {"diagnostics", CAP_DIAG, offsetof(service_payload_t, diagnostics)},
-    {"ota", CAP_OTA, offsetof(service_payload_t, ota_status)},
+    {"ota", CAP_OTA, offsetof(service_payload_t, ota_status)}
     // Add more services as needed
 };
 
@@ -82,6 +87,9 @@ static void nodeio_handle_heartbeat(int client_fd) __attribute__((unused));
 static void nodeio_on_close(int client_fd);
 static void nodeio_on_message(int client_fd, const char *data, size_t len);
 
+// Ensure service setter prototype is visible (some compile units may not see nodeio_services.h early)
+nio_s_err_t nodeio_set_service_lut_struct_from_json(protocol_msg_t *p_msg, size_t payload_index, const char *service_name, struct cJSON *service_obj);
+
 // Helper function to map type_str to msg_type_t
 typedef struct
 {
@@ -93,8 +101,8 @@ static const type_map_t msg_type_map[] = {
     {MSG_TYP_CONNECT, MSG_CONNECT_REQUEST},
     {MSG_TYP_CONNECT_RESPONSE, MSG_CONNECT_RESPONSE},
     {MSG_TYP_NODE_DATA, MSG_NODE_DATA},
+    {MSG_TYP_NODE_EVENT, MSG_NODE_EVENT},
     {MSG_TYP_SUBSCRIBE, MSG_SUBSCRIBE},
-    {MSG_TYP_POLL_DATA, MSG_POLL_DATA},
     {MSG_TYP_OTA_REQUEST, MSG_OTA_REQUEST},
     {MSG_TYP_OTA_STATUS, MSG_OTA_STATUS},
     {MSG_TYP_DIAGNOSTIC, MSG_DIAGNOSTIC},
@@ -142,22 +150,24 @@ static inline msg_type_t nodeio_type_str_to_enum(const char *type_str)
 }
 
 // Build/extend capability mask from sensors array
-static inline capability_t nodeio_build_node_capmask_sensors(cJSON *sensors_array, capability_t current_mask)
+static inline capability_t nodeio_build_node_capmask_sensors(cJSON *sensors, capability_t current_mask)
 {
-    if (sensors_array && cJSON_IsArray(sensors_array))
+    if (sensors && cJSON_IsArray(sensors))
     {
-        int sensor_count = cJSON_GetArraySize(sensors_array);
+        int sensor_count = cJSON_GetArraySize(sensors);
         for (int i = 0; i < sensor_count; ++i)
         {
-            cJSON *sensor_item = cJSON_GetArrayItem(sensors_array, i);
+            cJSON *sensor_item = cJSON_GetArrayItem(sensors, i);
             if (sensor_item && cJSON_IsString(sensor_item))
             {
                 const char *sensor_name = sensor_item->valuestring;
-                for (size_t s = 0; s < sizeof(sensor_table) / sizeof(sensor_table[0]); ++s)
+                const field_lookup_t *s_lut = nodeio_get_sensors_lut();
+                size_t s_count = nodeio_get_sensors_lut_count();
+                for (size_t s = 0; s < s_count; ++s)
                 {
-                    if (strcmp(sensor_name, sensor_table[s].name) == 0)
+                    if (strcmp(sensor_name, s_lut[s].name) == 0)
                     {
-                        current_mask |= sensor_table[s].cap;
+                        current_mask |= s_lut[s].cap;
                         break;
                     }
                 }
@@ -179,11 +189,13 @@ static inline capability_t nodeio_build_node_capmask_services(cJSON *services_ar
             if (service_item && cJSON_IsString(service_item))
             {
                 const char *service_name = service_item->valuestring;
-                for (size_t s = 0; s < sizeof(service_table) / sizeof(service_table[0]); ++s)
+                const field_lookup_t *sv_lut = nodeio_get_services_lut();
+                size_t sv_count = nodeio_get_services_lut_count();
+                for (size_t s = 0; s < sv_count; ++s)
                 {
-                    if (strcmp(service_name, service_table[s].name) == 0)
+                    if (strcmp(service_name, sv_lut[s].name) == 0)
                     {
-                        current_mask |= service_table[s].cap;
+                        current_mask |= sv_lut[s].cap;
                         break;
                     }
                 }
@@ -231,6 +243,10 @@ static inline node_params_t *nodeio_update_node_params_from_json(uint8_t node_id
 }
 
 // Helper function to parse payload from JSON
+// Forward helpers
+static inline esp_err_t nodeio_parse_periodic_payload_item(protocol_msg_t *p_msg, cJSON *item, size_t payload_index, capability_t node_cap_mask);
+static inline esp_err_t nodeio_parse_sporadic_event(protocol_msg_t *p_msg, cJSON *msg_payload, capability_t node_cap_mask);
+
 static inline esp_err_t nodeio_parse_message_payload(cJSON *root, capability_t node_cap_mask, protocol_msg_t *p_currentmsg)
 {
     HEAP_TRACE_START("PARSE_PAYLOAD");
@@ -246,113 +262,203 @@ static inline esp_err_t nodeio_parse_message_payload(cJSON *root, capability_t n
         ESP_LOGW(TAG, "Node capability mask is empty");
     }
 
-    cJSON *payload_array = cJSON_GetObjectItem(root, "payload");
-    if (payload_array && cJSON_IsArray(payload_array))
+    cJSON *msg_payload = cJSON_GetObjectItem(root, "payload");
+    // For node_data, payload is an array; for node_event, payload is an object
+    if (msg_payload && cJSON_IsArray(msg_payload))
     {
-        int count = cJSON_GetArraySize(payload_array);
+        int count = cJSON_GetArraySize(msg_payload);
         p_currentmsg->payload.payload_count = (count > PROTOCOL_MAX_PAYLOAD_COUNT) ? PROTOCOL_MAX_PAYLOAD_COUNT : count;
         for (int i = 0; i < p_currentmsg->payload.payload_count; ++i)
         {
-            cJSON *item = cJSON_GetArrayItem(payload_array, i);
-            cJSON *type_item = cJSON_GetObjectItem(item, "type");
-            if (type_item && cJSON_IsString(type_item) && strcmp(type_item->valuestring, "sensor") == 0)
+            cJSON *item = cJSON_GetArrayItem(msg_payload, i);
+            if (nodeio_parse_periodic_payload_item(p_currentmsg, item, i, node_cap_mask) != ESP_OK)
             {
-                cJSON *sensor_obj = cJSON_GetObjectItem(item, "sensor");
-                if (sensor_obj && cJSON_IsObject(sensor_obj))
-                {
-                    cJSON *field = sensor_obj->child;
-                    while (field)
-                    {
-                        const char *key = field->string;
-                        bool valid = false;
-                        for (size_t s = 0; s < sizeof(sensor_table) / sizeof(sensor_table[0]); ++s)
-                        {
-                            // Compare the JSON key to the sensor name in the lookup table
-                            if (strcmp(key, sensor_table[s].name) == 0)
-                            {
-                                // If the node's capability mask includes this sensor type
-                                if (node_cap_mask & sensor_table[s].cap)
-                                {
-                                    /*
-                                     * Pointer arithmetic explanation:
-                                     * Each sensor value (e.g., temp, humidity) is a field in the sensor_payload_t struct.
-                                     * sensor_table[s].offset gives the byte offset of the field within sensor_payload_t.
-                                     * (uint8_t *)&p_currentmsg->payload.data[i].datafields.sensor casts the struct pointer to a byte pointer,
-                                     * so we can add the offset in bytes to reach the correct field.
-                                     * (float *) casts the result to a float pointer, so we can assign the value directly.
-                                     * This allows us to generically set any sensor field using the lookup table.
-                                     */
-                                    float *pval = (float *)((uint8_t *)&p_currentmsg->payload.data[i].datafields.sensor + sensor_table[s].offset);
-                                    *pval = (float)field->valuedouble;
-                                    p_currentmsg->payload.data[i].current_cap_mask |= sensor_table[s].cap;
-                                    valid = true;
-                                }
-                                else
-                                {
-                                    ESP_LOGD(TAG, "Sensor '%s' capability mask (%08X) not met", key, sensor_table[s].cap);
-                                }
-                                break;
-                            }
-                        }
-                        if (!valid)
-                        {
-                            ESP_LOGW(TAG, "Sensor '%s' not in node capability mask (%08X), ignoring", key, node_cap_mask);
-                        }
-                        field = field->next;
-                    }
-                }
-            }
-            // Handle other types (ota_status, diagnostic) as before...
-            else if (type_item && cJSON_IsString(type_item) && strcmp(type_item->valuestring, "ota_status") == 0)
-            {
-                cJSON *ota_obj = cJSON_GetObjectItem(item, "ota_status");
-                if (ota_obj && cJSON_IsObject(ota_obj))
-                {
-                    cJSON *status_code_item = cJSON_GetObjectItem(ota_obj, "status_code");
-                    cJSON *message_item = cJSON_GetObjectItem(ota_obj, "message");
-                    if (status_code_item && cJSON_IsNumber(status_code_item) &&
-                        message_item && cJSON_IsString(message_item))
-                    {
-                        p_currentmsg->payload.data[i].datafields.service.ota_status.status_code = status_code_item->valueint;
-                        strncpy(p_currentmsg->payload.data[i].datafields.service.ota_status.message, message_item->valuestring, sizeof(p_currentmsg->payload.data[i].datafields.service.ota_status.message) - 1);
-                        p_currentmsg->payload.data[i].datafields.service.ota_status.message[sizeof(p_currentmsg->payload.data[i].datafields.service.ota_status.message) - 1] = '\0';
-                        p_currentmsg->payload.data[i].current_cap_mask |= CAP_OTA;
-                    }
-                }
-            }
-            else if (type_item && cJSON_IsString(type_item) && strcmp(type_item->valuestring, "diagnostics") == 0)
-            {
-                cJSON *diag_obj = cJSON_GetObjectItem(item, "diagnostics");
-                if (diag_obj && cJSON_IsObject(diag_obj))
-                {
-                    cJSON *uptime_item = cJSON_GetObjectItem(diag_obj, "uptime_sec");
-                    cJSON *free_heap_item = cJSON_GetObjectItem(diag_obj, "free_heap");
-                    cJSON *rssi_item = cJSON_GetObjectItem(diag_obj, "rssi");
-                    cJSON *error_code_item = cJSON_GetObjectItem(diag_obj, "error_code");
-                    // Optionally handle 'info' string if needed in the future
-                    if (uptime_item && cJSON_IsNumber(uptime_item) &&
-                        free_heap_item && cJSON_IsNumber(free_heap_item) &&
-                        rssi_item && cJSON_IsNumber(rssi_item) &&
-                        error_code_item && cJSON_IsNumber(error_code_item))
-                    {
-                        p_currentmsg->payload.data[i].datafields.service.diagnostics.uptime_sec = uptime_item->valueint;
-                        p_currentmsg->payload.data[i].datafields.service.diagnostics.free_heap = free_heap_item->valueint;
-                        p_currentmsg->payload.data[i].datafields.service.diagnostics.rssi = rssi_item->valueint;
-                        p_currentmsg->payload.data[i].datafields.service.diagnostics.error_code = error_code_item->valueint;
-                        p_currentmsg->payload.data[i].current_cap_mask |= CAP_DIAG;
-                    }
-                }
+                ESP_LOGW(TAG, "Failed to parse periodic payload item at index %d", i);
             }
         }
 
         HEAP_TRACE_END_DEFAULT();
         return ESP_OK;
     }
+    // Node event: payload is an object, expecting sporadic_data_t - event triggered
+    else if (msg_payload && cJSON_IsObject(msg_payload))
+    {
+        // Delegate sporadic/event parsing to helper which writes only to sporadic_data
+        if (nodeio_parse_sporadic_event(p_currentmsg, msg_payload, node_cap_mask) != ESP_OK)
+        {
+            ESP_LOGW(TAG, "Failed to parse sporadic event payload");
+            HEAP_TRACE_END_DEFAULT();
+            return ESP_FAIL;
+        }
+        HEAP_TRACE_END_DEFAULT();
+        return ESP_OK;
+    }
     else
     {
-        ESP_LOGW(TAG, "No payload array found in message");
-
+        ESP_LOGW(TAG, "No valid payload found in message");
         HEAP_TRACE_END_DEFAULT();
+        return ESP_FAIL;
+    }
+}
+
+// Parse a single periodic payload array item (sensor or service) into p_msg->payload.periodic_data[payload_index]
+static inline esp_err_t nodeio_parse_periodic_payload_item(protocol_msg_t *p_msg, cJSON *item, size_t payload_index, capability_t node_cap_mask)
+{
+    if (!p_msg || !item)
+        return ESP_FAIL;
+
+    cJSON *type_item = cJSON_GetObjectItem(item, "type");
+    if (!type_item || !cJSON_IsString(type_item))
+        return ESP_FAIL;
+
+    const char *t = type_item->valuestring;
+    if (strcmp(t, "sensor") == 0)
+    {
+        cJSON *sensor_obj = cJSON_GetObjectItem(item, "sensor");
+        if (!sensor_obj || !cJSON_IsObject(sensor_obj))
+            return ESP_FAIL;
+
+        cJSON *field = sensor_obj->child;
+        while (field)
+        {
+            const char *key = field->string;
+            if (!key)
+            {
+                field = field->next;
+                continue;
+            }
+            // find in sensors LUT
+            const field_lookup_t *fld = nodeio_find_sensors_lut_field_by_name(key);
+            if (!fld)
+            {
+                ESP_LOGW(TAG, "Unknown sensor key '%s' in periodic payload", key);
+                field = field->next;
+                continue;
+            }
+            // ensure capability is present
+            if (!(node_cap_mask & fld->cap))
+            {
+                ESP_LOGD(TAG, "Sensor '%s' capability not present, ignoring", key);
+                field = field->next;
+                continue;
+            }
+            // Only handle simple float and scalar cases here
+            if (fld->ftype == FIELD_TYPE_FLOAT && cJSON_IsNumber(field))
+            {
+                float v = (float)field->valuedouble;
+                if (nodeio_set_sensor_lut_field(p_msg, payload_index, key, 0, &v) != NIO_OK)
+                {
+                    ESP_LOGW(TAG, "Failed to set sensor field '%s' into periodic slot %u", key, (unsigned)payload_index);
+                }
+            }
+            else
+            {
+                ESP_LOGW(TAG, "Unsupported sensor field type or JSON type for '%s'", key);
+            }
+            field = field->next;
+        }
+        return ESP_OK;
+    }
+    else if (strcmp(t, "ota_status") == 0)
+    {
+        cJSON *ota_obj = cJSON_GetObjectItem(item, "ota_status");
+        if (ota_obj && cJSON_IsObject(ota_obj))
+        {
+            return (nodeio_set_service_lut_struct_from_json(p_msg, payload_index, "ota_status", ota_obj) == NIO_S_OK) ? ESP_OK : ESP_FAIL;
+        }
+    }
+    else if (strcmp(t, "diagnostics") == 0)
+    {
+        cJSON *diag_obj = cJSON_GetObjectItem(item, "diagnostics");
+        if (diag_obj && cJSON_IsObject(diag_obj))
+        {
+            return (nodeio_set_service_lut_struct_from_json(p_msg, payload_index, "diagnostics", diag_obj) == NIO_S_OK) ? ESP_OK : ESP_FAIL;
+        }
+    }
+    return ESP_FAIL;
+}
+
+// Parse sporadic/event payload (object form) into p_msg->payload.sporadic_data only
+static inline esp_err_t nodeio_parse_sporadic_event(protocol_msg_t *p_msg, cJSON *msg_payload, capability_t node_cap_mask)
+{
+    if (!p_msg || !msg_payload)
+        return ESP_FAIL;
+
+    cJSON *event_type_item = cJSON_GetObjectItem(msg_payload, "event_type");
+    if (!event_type_item || !cJSON_IsString(event_type_item))
+        return ESP_FAIL;
+
+    const char *etype = event_type_item->valuestring;
+    if (strcmp(etype, "EVENT_DOOR") == 0)
+    {
+        /* Use the sensors LUT to validate the field and element count, and to
+           drive the write into sporadic storage via nodeio_set_sensor_lut_field(). */
+        const field_lookup_t *fld = nodeio_find_sensors_lut_field_by_name("door_state");
+        if (!fld)
+        {
+            ESP_LOGW(TAG, "No LUT entry for sporadic sensor 'door_state'");
+            return ESP_FAIL;
+        }
+
+        /* If node doesn't advertise capability, ignore the event silently. */
+        if (!(node_cap_mask & fld->cap))
+        {
+            ESP_LOGD(TAG, "Node capability does not include 'door_state', ignoring event");
+            return ESP_OK;
+        }
+
+        /* Hub subscription check removed: nodes only send events they were asked
+           to send. Acceptance is based on node capability (checked above). */
+
+        if (fld->loc != FIELD_LOC_SPORADIC)
+        {
+            ESP_LOGW(TAG, "LUT entry for 'door_state' not marked sporadic, refusing to write into sporadic area");
+            return ESP_FAIL;
+        }
+
+        /* Count present door_state_N keys and clamp to declared elem_count */
+        int field_count = 0;
+        cJSON *current_item = msg_payload->child;
+        while (current_item)
+        {
+            if (current_item->string && strncmp(current_item->string, "door_state_", 11) == 0)
+                field_count++;
+            current_item = current_item->next;
+        }
+        if (field_count > (int)fld->elem_count)
+            field_count = (int)fld->elem_count;
+
+        for (int i = 0; i < field_count; ++i)
+        {
+            /* allocate a slightly larger buffer to satisfy static analyzers for
+               large integer values (although elem_count will usually be small) */
+            char key[32];
+            snprintf(key, sizeof(key), "door_state_%d", i);
+            cJSON *door_state_item = cJSON_GetObjectItem(msg_payload, key);
+            uint8_t val = 0xFF; // unknown
+            if (door_state_item)
+            {
+                if (cJSON_IsString(door_state_item))
+                {
+                    val = (strcmp(door_state_item->valuestring, "OPEN") == 0) ? 1 : 0;
+                }
+                else if (cJSON_IsNumber(door_state_item))
+                {
+                    val = (uint8_t)door_state_item->valueint;
+                }
+            }
+
+            /* payload_index is ignored for sporadic fields by the helper, pass 0 */
+            if (nodeio_set_sensor_lut_field(p_msg, 0, "door_state", (size_t)i, &val) != NIO_OK)
+            {
+                ESP_LOGW(TAG, "Failed to set sporadic door_state_%d", i);
+            }
+        }
+        return ESP_OK;
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Unknown event_type: %s", etype);
         return ESP_FAIL;
     }
 }
@@ -544,7 +650,28 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
             }
         }
     }
-#include "modemanager.h"
+
+    // If msg_type EVENT, process the event message after checking states
+    if (msg_type == MSG_NODE_EVENT)
+    {
+        if (NULL == *pp_session || NULL == *pp_node)
+        {
+            nodeio_handle_error(client_fd, "Session or Node context non existent");
+            cJSON_Delete(root);
+            return;
+        }
+        if ((*pp_session)->client_fd == client_fd && (*pp_node)->current_state == NODEIO_STATE_CONNECTED)
+        {
+            // Parse message payload
+            if (nodeio_parse_message_payload(root, (*pp_node)->capability_mask, p_currentmsg) != ESP_OK)
+            {
+                nodeio_handle_error(client_fd, "Failed to parse message payload");
+                cJSON_Delete(root);
+                return;
+            }
+        }
+    }
+
     cJSON_Delete(root);
 
     // Reset/extend active window on valid message from node
@@ -619,22 +746,27 @@ static void nodeio_subscribe_to_node(int node_id, const subscribe_config_t *conf
                 // Filter (example: sensors/services hardcoded for now)
                 cJSON *filter = cJSON_CreateObject();
                 cJSON *sensors = cJSON_CreateArray();
-                // Dynamically add sensors based on subscribe_mask using sensor_table
-                for (size_t s = 0; s < sizeof(sensor_table) / sizeof(sensor_table[0]); ++s)
+                // Dynamically add sensors based on subscribe_mask using sensors LUT
+                const field_lookup_t *s_lut = nodeio_get_sensors_lut();
+                size_t s_count = nodeio_get_sensors_lut_count();
+                for (size_t s = 0; s < s_count; ++s)
                 {
-                    if (config->subscribe_mask & sensor_table[s].cap)
+                    if (config->subscribe_mask & s_lut[s].cap)
                     {
-                        cJSON_AddItemToArray(sensors, cJSON_CreateString(sensor_table[s].name));
+                        cJSON_AddItemToArray(sensors, cJSON_CreateString(s_lut[s].name));
                     }
                 }
                 cJSON_AddItemToObject(filter, "sensors", sensors);
                 // Dynamically add services based on subscribe_mask using service_table
                 cJSON *services = cJSON_CreateArray();
-                for (size_t s = 0; s < sizeof(service_table) / sizeof(service_table[0]); ++s)
+                // Dynamically add services based on subscribe_mask using services LUT
+                const field_lookup_t *sv_lut = nodeio_get_services_lut();
+                size_t sv_count = nodeio_get_services_lut_count();
+                for (size_t s = 0; s < sv_count; ++s)
                 {
-                    if (config->subscribe_mask & service_table[s].cap)
+                    if (config->subscribe_mask & sv_lut[s].cap)
                     {
-                        cJSON_AddItemToArray(services, cJSON_CreateString(service_table[s].name));
+                        cJSON_AddItemToArray(services, cJSON_CreateString(sv_lut[s].name));
                     }
                 }
                 cJSON_AddItemToObject(filter, "services", services);
@@ -801,7 +933,9 @@ static void nodeio_send_connect_response(int client_fd, uint32_t seq_num)
     // get node_id from session
     int node_id = websockserver_session_find_sessid(client_fd);
     ESP_LOGD(TAG, "Sending connect response to node id %d on client_fd %d", node_id, client_fd);
-    int len = snprintf(resp_msg, sizeof(resp_msg), "{\"type\":\"connect_response\",\"node_id\":%d,\"seq_num\":%lu,\"timestamp\":%lu,\"status\":\"accepted\"}", node_id, seq_num, (uint32_t)time(NULL));
+    /* Include the protocol magic in responses and use unsigned format specifiers for uint32_t values */
+    int len = snprintf(resp_msg, sizeof(resp_msg), "{\"magic\":%u,\"type\":\"connect_response\",\"node_id\":%u,\"seq_num\":%u,\"timestamp\":%u,\"status\":\"accepted\"}",
+                       (unsigned)PROTOCOL_MAGIC, (unsigned)node_id, (unsigned)seq_num, (unsigned)(uint32_t)time(NULL));
     if (len < 0 || len >= (int)sizeof(resp_msg))
     {
         ESP_LOGE(TAG, "Connect response message truncated or error occurred");
@@ -814,7 +948,17 @@ static void nodeio_send_error(int client_fd, const char *error_msg)
 {
     // Send an error message back to the node
     char err_msg[128];
-    int len = snprintf(err_msg, sizeof(err_msg), "{\"type\":\"error\",\"message\":\"%s\"}", error_msg);
+    /* Include protocol envelope fields when sending errors */
+    int node_id = websockserver_session_find_sessid(client_fd);
+    unsigned u_node_id = (node_id >= 0) ? (unsigned)node_id : 0u;
+    unsigned seq = (node_id >= 0) ? (unsigned)node_local_seq[node_id]++ : 0u;
+    int len = snprintf(err_msg, sizeof(err_msg), "{\"magic\":%u,\"type\":\"error\",\"node_id\":%u,\"seq_num\":%u,\"timestamp\":%u,\"payload\":{\"message\":\"%s\"}}",
+                       (unsigned)PROTOCOL_MAGIC, u_node_id, seq, (unsigned)(uint32_t)time(NULL), error_msg);
+    if (len < 0 || len >= (int)sizeof(err_msg))
+    {
+        ESP_LOGE(TAG, "Error message formatting truncated or failed");
+        return;
+    }
     websockserver_send(client_fd, err_msg, len);
 }
 
@@ -827,8 +971,19 @@ static void nodeio_process_diagnostic(int client_fd, const char *diag_info)
 static void nodeio_request_diagnostic(int client_fd)
 {
     // Send a request to the node to provide diagnostic information
-    const char *diag_req = "{\"type\":\"diag_request\"}";
-    websockserver_send(client_fd, diag_req, strlen(diag_req));
+    /* Build protocol-compliant diagnostic request including magic and envelope */
+    char diag_req[128];
+    int node_id = websockserver_session_find_sessid(client_fd);
+    unsigned u_node_id = (node_id >= 0) ? (unsigned)node_id : 0u;
+    unsigned seq = (node_id >= 0) ? (unsigned)node_local_seq[node_id]++ : 0u;
+    int len = snprintf(diag_req, sizeof(diag_req), "{\"magic\":%u,\"type\":\"%s\",\"node_id\":%u,\"seq_num\":%u,\"timestamp\":%u}",
+                       (unsigned)PROTOCOL_MAGIC, MSG_TYP_DIAGNOSTIC_REQUEST, u_node_id, seq, (unsigned)(uint32_t)time(NULL));
+    if (len < 0 || len >= (int)sizeof(diag_req))
+    {
+        ESP_LOGE(TAG, "diag request formatting truncated or failed");
+        return;
+    }
+    websockserver_send(client_fd, diag_req, len);
 }
 
 static void nodeio_handle_disconnect(int client_fd, uint8_t node_id)
@@ -931,8 +1086,19 @@ static void nodeio_handle_timeout(int client_fd)
 static void nodeio_handle_heartbeat(int client_fd)
 {
     // Handle heartbeat messages from the node
-    const char *heartbeat_ack = "{\"type\":\"heartbeat_ack\"}";
-    websockserver_send(client_fd, heartbeat_ack, strlen(heartbeat_ack));
+    /* Reply with a protocol envelope heartbeat ack */
+    char heartbeat_ack[128];
+    int node_id = websockserver_session_find_sessid(client_fd);
+    unsigned u_node_id = (node_id >= 0) ? (unsigned)node_id : 0u;
+    unsigned seq = (node_id >= 0) ? (unsigned)node_local_seq[node_id]++ : 0u;
+    int len = snprintf(heartbeat_ack, sizeof(heartbeat_ack), "{\"magic\":%u,\"type\":\"heartbeat_ack\",\"node_id\":%u,\"seq_num\":%u,\"timestamp\":%u}",
+                       (unsigned)PROTOCOL_MAGIC, u_node_id, seq, (unsigned)(uint32_t)time(NULL));
+    if (len < 0 || len >= (int)sizeof(heartbeat_ack))
+    {
+        ESP_LOGE(TAG, "heartbeat ack formatting truncated or failed");
+        return;
+    }
+    websockserver_send(client_fd, heartbeat_ack, len);
 }
 
 // Websocket server close callback
@@ -997,24 +1163,30 @@ void nodeio_monitor_nodeslist(void)
             // Iterate through payload
             for (int j = 0; j < node_contexts[i].p_msg->payload.payload_count; j++)
             {
-                // Print all sensor values in a concise, tabular way using the lookup table
-                for (size_t s = 0; s < sizeof(sensor_table) / sizeof(sensor_table[0]); ++s)
+                // Print all sensor values in a concise, tabular way using the sensors LUT
                 {
-                    if (node_contexts[i].p_msg->payload.data[j].current_cap_mask & sensor_table[s].cap)
+                    const field_lookup_t *s_lut = nodeio_get_sensors_lut();
+                    size_t s_count = nodeio_get_sensors_lut_count();
+                    for (size_t s = 0; s < s_count; ++s)
                     {
-                        volatile float *pval = (float *)((uint8_t *)&node_contexts[i].p_msg->payload.data[j].datafields.sensor + sensor_table[s].offset);
-                        (void)pval; // silence when logging disabled
-                        // ESP_LOGI(TAG, "Node %d sensor payload: %s: %.2f", i, sensor_table[s].name, *pval);
+                        float fv = 0.0f;
+                        if (nodeio_get_sensor_lut_field(node_contexts[i].p_msg, j, s_lut[s].name, 0, &fv, sizeof(fv)) == NIO_OK)
+                        {
+                            (void)fv; // silence when logging disabled
+                            // ESP_LOGI(TAG, "Node %d sensor payload: %s: %.2f", i, s_lut[s].name, fv);
+                        }
                     }
                 }
-                // Print each service diag or ota value if present
-                if (node_contexts[i].p_msg->payload.data[j].current_cap_mask & CAP_DIAG)
+
+                // Print each service diag or ota value if present (serialize via service helper)
+                char serbuf[128];
+                if (nodeio_serialize_service_lut(node_contexts[i].p_msg, j, "diagnostics", serbuf, sizeof(serbuf)) == NIO_S_OK)
                 {
-                    // ESP_LOGI(TAG, "Node %d service payload: Diag: %d", i, node_contexts[i].p_msg->payload.data[j].datafields.service.diagnostics.error_code);
+                    // ESP_LOGI(TAG, "Node %d service payload: Diag: %s", i, serbuf);
                 }
-                if (node_contexts[i].p_msg->payload.data[j].current_cap_mask & CAP_OTA)
+                if (nodeio_serialize_service_lut(node_contexts[i].p_msg, j, "ota_status", serbuf, sizeof(serbuf)) == NIO_S_OK)
                 {
-                    // ESP_LOGI(TAG, "Node %d service payload: OTA: %s", i, node_contexts[i].p_msg->payload.data[j].datafields.service.ota_status.message);
+                    // ESP_LOGI(TAG, "Node %d service payload: OTA: %s", i, serbuf);
                 }
             }
             // Log if node is online
@@ -1095,52 +1267,65 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
                                (unsigned)ctx->subscription.subscribe_mask,
                                (unsigned)ctx->subscription.interval_ms);
 
-            // Sensors: output all available from sensor_table
+            // Sensors: output all available from sensors LUT
             int first_sensor = 1;
-            for (size_t s = 0; s < sizeof(sensor_table) / sizeof(sensor_table[0]); ++s)
             {
-                if (!first_sensor)
+                const field_lookup_t *s_lut = nodeio_get_sensors_lut();
+                size_t s_count = nodeio_get_sensors_lut_count();
+                for (size_t s = 0; s < s_count; ++s)
                 {
-                    offset += snprintf(json + offset, json_size - offset, ",");
-                }
-                first_sensor = 0;
-                if (ctx->p_msg && ctx->p_msg->payload.payload_count > 0 &&
-                    (ctx->p_msg->payload.data[0].current_cap_mask & sensor_table[s].cap))
-                {
-                    float *pval = (float *)((uint8_t *)&ctx->p_msg->payload.data[0].datafields.sensor + sensor_table[s].offset);
-                    offset += snprintf(json + offset, json_size - offset, "\"%s\":%.2f", sensor_table[s].name, *pval);
-                }
-                else
-                {
-                    offset += snprintf(json + offset, json_size - offset, "\"%s\":null", sensor_table[s].name);
+                    if (!first_sensor)
+                    {
+                        offset += snprintf(json + offset, json_size - offset, ",");
+                    }
+                    first_sensor = 0;
+                    float fv = 0.0f;
+                    if (ctx->p_msg && ctx->p_msg->payload.payload_count > 0 &&
+                        nodeio_get_sensor_lut_field(ctx->p_msg, 0, s_lut[s].name, 0, &fv, sizeof(fv)) == NIO_OK)
+                    {
+                        offset += snprintf(json + offset, json_size - offset, "\"%s\":%.2f", s_lut[s].name, fv);
+                    }
+                    else
+                    {
+                        offset += snprintf(json + offset, json_size - offset, "\"%s\":null", s_lut[s].name);
+                    }
                 }
             }
 
-            // Services: output all available from service_table
+            // Services: output all available from services LUT
             offset += snprintf(json + offset, json_size - offset, ",\"services\":{");
             int first_service = 1;
-            for (size_t s = 0; s < sizeof(service_table) / sizeof(service_table[0]); ++s)
             {
-                if (ctx->p_msg && ctx->p_msg->payload.payload_count > 0 &&
-                    (ctx->p_msg->payload.data[0].current_cap_mask & service_table[s].cap))
+                const field_lookup_t *sv_lut = nodeio_get_services_lut();
+                size_t sv_count = nodeio_get_services_lut_count();
+                for (size_t s = 0; s < sv_count; ++s)
                 {
                     if (!first_service)
                         offset += snprintf(json + offset, json_size - offset, ",");
                     first_service = 0;
-                    // Output service value if available, else true
-                    if (strcmp(service_table[s].name, "diagnostics") == 0)
+                    char serbuf[256];
+                    if (ctx->p_msg && ctx->p_msg->payload.payload_count > 0 &&
+                        nodeio_serialize_service_lut(ctx->p_msg, 0, sv_lut[s].name, serbuf, sizeof(serbuf)) == NIO_S_OK)
                     {
-                        int err = ctx->p_msg->payload.data[0].datafields.service.diagnostics.error_code;
-                        offset += snprintf(json + offset, json_size - offset, "\"%s\":%d", service_table[s].name, err);
-                    }
-                    else if (strcmp(service_table[s].name, "ota") == 0)
-                    {
-                        const char *msg = ctx->p_msg->payload.data[0].datafields.service.ota_status.message;
-                        offset += snprintf(json + offset, json_size - offset, "\"%s\":\"%s\"", service_table[s].name, msg ? msg : "");
-                    }
-                    else
-                    {
-                        offset += snprintf(json + offset, json_size - offset, "\"%s\":true", service_table[s].name);
+                        // If service is diagnostics, extract error_code quickly from serialized JSON
+                        if (strcmp(sv_lut[s].name, "diagnostics") == 0)
+                        {
+                            // crude parse: find "error_code":<num>
+                            const char *p = strstr(serbuf, "\"error_code\":");
+                            int errval = 0;
+                            if (p)
+                                (void)sscanf(p, "\"error_code\":%d", &errval);
+                            offset += snprintf(json + offset, json_size - offset, "\"%s\":%d", sv_lut[s].name, errval);
+                        }
+                        else if (strcmp(sv_lut[s].name, "ota") == 0 || strcmp(sv_lut[s].name, "ota_status") == 0)
+                        {
+                            // include stringified service payload
+                            offset += snprintf(json + offset, json_size - offset, "\"%s\":\"%s\"", sv_lut[s].name, serbuf);
+                        }
+                        else
+                        {
+                            offset += snprintf(json + offset, json_size - offset, "\"%s\":true", sv_lut[s].name);
+                        }
                     }
                 }
             }

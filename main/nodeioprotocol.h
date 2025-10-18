@@ -17,6 +17,8 @@
 // --- Maximum payload count ---
 #define PROTOCOL_MAX_PAYLOAD_COUNT 10
 
+#define NUM_DOOR_SENSORS 3
+
 // --- Capability bitmask ---
 typedef enum
 {
@@ -25,10 +27,12 @@ typedef enum
     CAP_HUMIDITY = 1 << 2,
     CAP_DISTANCE = 1 << 3,
     CAP_LIGHTSENSE = 1 << 4,
-    CAP_LED = 1 << 5,
-    CAP_BUZZER = 1 << 6,
-    CAP_DIAG = 1 << 7,
-    CAP_OTA = 1 << 8
+    CAP_DOORSENSE = 1 << 5, // New capability for door sensors
+    CAP_LED = 1 << 6,
+    CAP_BUZZER = 1 << 7,
+    CAP_DIAG = 1 << 8,
+    CAP_OTA = 1 << 9,
+    CAP_ALERT = 1 << 10
     // max 32 bits
 } capability_flag_t;
 
@@ -65,9 +69,9 @@ typedef struct
 // Message type values
 #define MSG_CONNECT_REQUEST_VAL 0xA0
 #define MSG_CONNECT_RESPONSE_VAL 0xA1
-#define MSG_SENSOR_DATA_VAL 0xA2
-#define MSG_SUBSCRIBE_VAL 0xA3
-#define MSG_POLL_DATA_VAL 0xA4
+#define MSG_NODE_DATA_VAL 0xA2
+#define MSG_NODE_EVENT_VAL 0xA3
+#define MSG_SUBSCRIBE_VAL 0xA4
 #define MSG_OTA_REQUEST_VAL 0xA5
 #define MSG_OTA_STATUS_VAL 0xA6
 #define MSG_DIAGNOSTIC_VAL 0xA7
@@ -85,8 +89,8 @@ typedef enum
     MSG_CONNECT_REQUEST = 0xA0,
     MSG_CONNECT_RESPONSE = 0xA1,
     MSG_NODE_DATA = 0xA2,
-    MSG_SUBSCRIBE = 0xA3,
-    MSG_POLL_DATA = 0xA4,
+    MSG_NODE_EVENT = 0xA3,
+    MSG_SUBSCRIBE = 0xA4,
     MSG_OTA_REQUEST = 0xA5,
     MSG_OTA_STATUS = 0xA6,
     MSG_DIAGNOSTIC = 0xA7,
@@ -104,8 +108,8 @@ typedef enum
 extern const char MSG_TYP_CONNECT[];
 extern const char MSG_TYP_CONNECT_RESPONSE[];
 extern const char MSG_TYP_NODE_DATA[];
+extern const char MSG_TYP_NODE_EVENT[];
 extern const char MSG_TYP_SUBSCRIBE[];
-extern const char MSG_TYP_POLL_DATA[];
 extern const char MSG_TYP_OTA_REQUEST[];
 extern const char MSG_TYP_OTA_STATUS[];
 extern const char MSG_TYP_DIAGNOSTIC[];
@@ -124,7 +128,7 @@ extern const char MSG_PAYLOAD_TYPE_DIAGNOSTIC[];
 extern const char MSG_PAYLOAD_TYPE_OTA_STATUS[];
 // more to be added
 
-// --- Sensor Data payload ---
+// --- Periodic Sensor Data payload ---
 typedef struct
 {
     float temp;
@@ -134,6 +138,35 @@ typedef struct
     float light;
     // Add more as needed
 } sensor_payload_t;
+
+typedef enum
+{
+    EVENT_DOOR,
+    EVENT_BUTTON,
+    EVENT_MOTION,
+    // Add more event types as needed
+} sensor_event_type_t;
+
+typedef struct
+{
+    sensor_event_type_t event_type;
+    union
+    {
+        struct
+        {
+            uint8_t door_state[NUM_DOOR_SENSORS];
+        } door;
+        struct
+        {
+            bool button_pressed;
+        } button;
+        struct
+        {
+            bool motion_detected;
+        } motion;
+        // Add more event structs as needed
+    } data;
+} sporadic_sensor_payload_t;
 
 // --- OTA/update payload ---
 typedef struct
@@ -166,7 +199,33 @@ typedef struct
     // Add more service payloads as needed
 } service_payload_t;
 
-// Payload type containing union of data type and total number of payload packets
+typedef enum
+{
+    SERVICE_EVENT_ALERT,
+    SERVICE_EVENT_OTA,
+    // Add more service event types as needed
+} service_event_type_t;
+
+typedef struct
+{
+    service_event_type_t event_type;
+    union
+    {
+        struct
+        {
+            int alert_code;
+            char alert_message[64];
+        } alert;
+        struct
+        {
+            int ota_status_code;
+            char ota_message[64];
+        } ota;
+        // Add more service event structs as needed
+    } data;
+} sporadic_service_payload_t;
+
+// Payload type containing union of data type and total number of periodic payload packets
 typedef struct
 {
     capability_t current_cap_mask; // Indicates which fields in the struct are valid
@@ -175,12 +234,24 @@ typedef struct
         sensor_payload_t sensor;
         service_payload_t service;
     } datafields;
-} data_t;
+} periodic_data_t;
+
+// Payload type containing union of data type and total number of sporadic payload packets
+typedef struct
+{
+    capability_t current_cap_mask; // Indicates which fields in the struct are valid
+    union
+    {
+        sporadic_sensor_payload_t sensor;
+        sporadic_service_payload_t service;
+    } datafields;
+} sporadic_data_t;
 
 typedef struct
 {
     uint8_t payload_count; // total number of payload packets
-    data_t data[PROTOCOL_MAX_PAYLOAD_COUNT];
+    periodic_data_t periodic_data[PROTOCOL_MAX_PAYLOAD_COUNT];
+    sporadic_data_t sporadic_data;
 } payload_t;
 
 // --- Protocol message envelope ---

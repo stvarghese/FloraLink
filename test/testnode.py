@@ -11,6 +11,156 @@ import threading
 import contextlib
 from contextlib import contextmanager
 
+# Optional nice UI: colors and interactive prompt
+try:
+    import colorama
+    colorama.init()
+    _HAS_COLORAMA = True
+except Exception:
+    _HAS_COLORAMA = False
+
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.styles import Style
+    _HAS_PROMPT_TOOLKIT = True
+except Exception:
+    _HAS_PROMPT_TOOLKIT = False
+
+
+class Logger:
+    """Simple colored logger used by the testnode client.
+
+    Logging respects an asyncio.Event to enable/disable live log printing
+    (used to pause logs while in command mode).
+    """
+    ANSI_RESET = '\x1b[0m'
+    COLORS = [
+        '\x1b[38;5;39m',  # blue
+        '\x1b[38;5;82m',  # green
+        '\x1b[38;5;214m', # orange
+        '\x1b[38;5;201m', # pink
+        '\x1b[38;5;226m', # yellow
+        '\x1b[38;5;51m',  # cyan
+        '\x1b[38;5;208m', # coral
+        '\x1b[38;5;45m',  # teal
+    ]
+
+    def __init__(self):
+        self._enabled_event = None
+
+    def set_enabled_event(self, ev: 'asyncio.Event'):
+        self._enabled_event = ev
+
+    def _enabled(self):
+        return (self._enabled_event is None) or (self._enabled_event.is_set())
+
+    def _color(self, s, color_code):
+        if _HAS_COLORAMA or os.name != 'nt':
+            return f"{color_code}{s}{self.ANSI_RESET}"
+        return s
+
+    def info(self, msg: str):
+        if not self._enabled():
+            return
+        ts = time.strftime('%H:%M:%S')
+        global LAST_ACTIVITY
+        LAST_ACTIVITY = time.time()
+        print(self._color(f"[{ts}] {msg}", '\x1b[37m'))
+
+    def node(self, node_id: int, msg: str, kind: str = 'INFO', payload=None):
+        if not self._enabled():
+            return
+        ts = time.strftime('%H:%M:%S')
+        global LAST_ACTIVITY
+        LAST_ACTIVITY = time.time()
+        color = self.COLORS[node_id % len(self.COLORS)]
+        header = f"[{ts}] Node {node_id:02d} | {kind}"
+        hdr = self._color(header, color)
+        if payload is None:
+            print(f"{hdr} - {msg}")
+        else:
+            # pretty-print small payloads inline, larger payloads as JSON
+            try:
+                s = json.dumps(payload, ensure_ascii=False)
+            except Exception:
+                s = str(payload)
+            print(f"{hdr} - {msg}: {s}")
+
+    def warn(self, msg: str):
+        if not self._enabled():
+            return
+        ts = time.strftime('%H:%M:%S')
+        global LAST_ACTIVITY
+        LAST_ACTIVITY = time.time()
+        print(self._color(f"[{ts}] WARN: {msg}", '\x1b[38;5;208m'))
+
+    def error(self, msg: str):
+        ts = time.strftime('%H:%M:%S')
+        global LAST_ACTIVITY
+        LAST_ACTIVITY = time.time()
+        print(self._color(f"[{ts}] ERROR: {msg}", '\x1b[38;5;196m'))
+
+    def prompt(self):
+        # Synchronous fallback prompt (used when prompt_toolkit not available).
+        try:
+            return input(self._color('> ', '\x1b[36m'))
+        except EOFError:
+            return ''
+
+
+async def _spinner_task(stop_event: asyncio.Event):
+    """Background spinner shown when idle for SPINNER_IDLE_SECONDS."""
+    idx = 0
+    printed = False
+    while not stop_event.is_set():
+        # Don't show spinner while logs are disabled (command mode) or when using prompt_toolkit
+        try:
+            enabled = LOGGER._enabled()
+        except Exception:
+            enabled = True
+        if (not enabled) or _HAS_PROMPT_TOOLKIT:
+            if printed:
+                # clear previous spinner
+                print('\r' + ' ' * 60 + '\r', end='', flush=True)
+                printed = False
+            await asyncio.sleep(0.2)
+            continue
+
+        now = time.time()
+        if now - LAST_ACTIVITY < SPINNER_IDLE_SECONDS:
+            # Not idle
+            if printed:
+                print('\r' + ' ' * 60 + '\r', end='', flush=True)
+                printed = False
+            await asyncio.sleep(0.2)
+            continue
+
+        # Show spinner inline
+        ch = SPINNER_CHARS[idx % len(SPINNER_CHARS)]
+        print(f"\r{ch} idle... press 'cmd' to enter command mode", end='', flush=True)
+        printed = True
+        idx += 1
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=0.15)
+        except asyncio.TimeoutError:
+            pass
+
+    # clear spinner line on exit
+    if printed:
+        print('\r' + ' ' * 60 + '\r', end='', flush=True)
+
+
+# Global logger instance
+LOGGER = Logger()
+
+# Timestamp of last visible activity (seconds since epoch)
+LAST_ACTIVITY = time.time()
+
+# Idle spinner settings
+SPINNER_IDLE_SECONDS = 2.0
+SPINNER_CHARS = ['|', '/', '-', '\\']
+
 # Protocol constants (should match nodeioprotocol.h)
 PROTOCOL_MAGIC = 0xBEEFBEEF
 MAX_NODES = 8
@@ -20,19 +170,51 @@ MSG_PAYLOAD_TYPE_SENSOR = "sensor"
 MSG_PAYLOAD_TYPE_DIAGNOSTICS = "diagnostics"
 MSG_PAYLOAD_TYPE_OTA_STATUS = "ota_status"
 MSG_TYP_DISCONNECT_REQUEST = "disconnect_request"
+MSG_TYP_NODE_EVENT = "node_event"
+MSG_EVENT_DOOR = "EVENT_DOOR"
+MSG_EVENT_SERVICE = "EVENT_SERVICE"
 
 SAMPLE_MSG_PATH = os.path.join(os.path.dirname(__file__), "..", "main", "samplenodemsg.json")
+
+# Attempt to auto-detect NUM_DOOR_SENSORS from the C header so the test client
+# stays in sync with the firmware's declaration. Falls back to 1 if parsing fails.
+def _detect_num_door_sensors():
+    try:
+        hdr = os.path.join(os.path.dirname(__file__), '..', 'main', 'nodeioprotocol.h')
+        with open(hdr, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('#define') and 'NUM_DOOR_SENSORS' in line:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        try:
+                            return int(parts[2])
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+    return 1
+
+DOOR_COUNT = _detect_num_door_sensors()
 
 def build_base_message(msg_type, node_id, seq_num):
     # Ensure node_id is numeric for strict backend parsing
     node_id = int(node_id)
+    sensors_default = ["temperature", "humidity", "moisture"]
+    # Advertise door_state capability when door sensors exist so the hub accepts door events
+    try:
+        if DOOR_COUNT and DOOR_COUNT > 0:
+            sensors_default.append("door_state")
+    except NameError:
+        pass
+
     return {
         "magic": PROTOCOL_MAGIC,
         "type": msg_type,
         "node_id": node_id,
         "controller": 2,  # CONTROLLER_ARDUINO
         "sw_version": "1.0.0",
-        "sensors": ["temperature", "humidity", "moisture"],
+        "sensors": sensors_default,
         "services": ["diagnostics", "ota"],
         "seq_num": seq_num,
         "timestamp": int(time.time()),
@@ -81,7 +263,28 @@ def build_payloads(sensors):
 
     return [sensor_payload, diagnostics_payload, ota_status_payload]
 
-async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_enabled, disconnect_event=None, send_event=None):
+
+def build_event_message(node_id, seq_num, event_type, event_fields: dict):
+    """Build a node_event message where payload is a single object."""
+    msg = build_base_message(MSG_TYP_NODE_EVENT, node_id, seq_num)
+    payload = {"event_type": event_type}
+    payload.update(event_fields)
+    msg["payload"] = payload
+    return msg
+
+
+def build_door_event_descriptor(door_states):
+    """Return an event descriptor for door states (list of strings or numbers)."""
+    return {"kind": "door", "states": list(door_states)}
+
+
+def build_service_event_descriptor(name, **kwargs):
+    """Return an event descriptor for a service event. kwargs depend on service."""
+    desc = {"kind": "service", "name": name}
+    desc.update(kwargs)
+    return desc
+
+async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_enabled, disconnect_event=None, send_event=None, event_queue=None):
     """
     Simulates a single node over a websocket connection.
 
@@ -98,8 +301,7 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
     """
 
     def log(msg):
-        if log_enabled.is_set():
-            print(msg)
+        LOGGER.node(node_id, msg, kind='INFO')
 
     websocket = None
     recv_task = None
@@ -117,9 +319,9 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                 ping_interval=None,
                 max_size=2**20,
             )
-            log(f"[Node {node_id}] Connected to {uri} (subprotocol: {websocket.subprotocol})")
+            LOGGER.node(node_id, f"Connected to {uri} (subprotocol: {websocket.subprotocol})", kind='CONNECT')
             if websocket.subprotocol != "arduino":
-                log(f"[Node {node_id}] Warning: negotiated subprotocol is '{websocket.subprotocol}', expected 'arduino'")
+                LOGGER.node(node_id, f"Warning: negotiated subprotocol is '{websocket.subprotocol}', expected 'arduino'", kind='WARN')
         except getattr(websockets, 'NegotiationError', Exception) as e:  # older/newer websockets versions
             log(f"[Node {node_id}] Subprotocol negotiation failed: {e}")
             if disconnect_event:
@@ -134,18 +336,18 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
         # Send connect request
         connect_req = build_base_message(MSG_TYP_CONNECT, node_id, 0)
         await websocket.send(json.dumps(connect_req))
-        log(f"[Node {node_id}] Sent connect request")
+        LOGGER.node(node_id, "Sent connect request", kind='TX')
 
         # Wait for acceptance
         try:
             response = await asyncio.wait_for(websocket.recv(), timeout=10)
-            log(f"[Node {node_id}] Received: {response}")
+            LOGGER.node(node_id, "Received", kind='RX', payload=json.loads(response) if response else None)
             resp_obj = json.loads(response)
             if resp_obj.get("type") != "connect_response" or resp_obj.get("status") != "accepted":
                 log(f"[Node {node_id}] Connection not accepted. Exiting.")
                 return
         except asyncio.TimeoutError:
-            log(f"[Node {node_id}] No response to connect request (timeout). Exiting.")
+            LOGGER.node(node_id, "No response to connect request (timeout). Exiting.", kind='WARN')
             if disconnect_event:
                 disconnect_event.set()
             return
@@ -157,16 +359,14 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                     try:
                         msg = await websocket.recv()
                         # Optional: log unexpected server pushes
-                        if log_enabled.is_set():
-                            print(f"[Node {node_id}] <- {msg}")
+                        LOGGER.node(node_id, "<- server push", kind='RX', payload=json.loads(msg) if msg else None)
                     except asyncio.CancelledError:
                         break
                     except websockets.ConnectionClosed:  # server closed
                         break
                     except Exception as e:
                         # Keep receiving unless fatal
-                        if log_enabled.is_set():
-                            print(f"[Node {node_id}] Receiver error: {e}")
+                        LOGGER.node(node_id, f"Receiver error: {e}", kind='ERROR')
                         await asyncio.sleep(0.05)
             finally:
                 return
@@ -180,13 +380,27 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                 # Graceful disconnect requested externally
                 if disconnect_event and disconnect_event.is_set():
                     disconnect_msg = build_base_message(MSG_TYP_DISCONNECT_REQUEST, node_id, seq_num)
-                    log(f"[Node {node_id}] Sending disconnect request")
+                    LOGGER.node(node_id, "Sending disconnect request", kind='TX')
                     await websocket.send(json.dumps(disconnect_msg))
-                    log(f"[Node {node_id}] Sent disconnect request")
+                    LOGGER.node(node_id, "Sent disconnect request", kind='TX')
                     return  # exit loop → final cleanup happens in finally
 
                 # Wait until allowed to send (pause/resume)
                 await control_event.wait()
+
+                # First, drain any queued events and send them immediately
+                if event_queue is not None:
+                    while True:
+                        try:
+                            ev = event_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        try:
+                            await websocket.send(json.dumps(ev))
+                            LOGGER.node(node_id, "Sent event", kind='EVENT', payload=ev.get('payload', ev))
+                            seq_num += 1
+                        except Exception as e:
+                            LOGGER.node(node_id, f"Failed to send event: {e}", kind='ERROR')
 
                 if manual_mode:
                     # Manual mode: wait for an explicit trigger to send one payload
@@ -209,7 +423,7 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                     msg["services"] = services
                     msg["payload"] = build_payloads(sensors)
                     await websocket.send(json.dumps(msg))
-                    log(f"[Node {node_id}] Sent live data (manual)")
+                    LOGGER.node(node_id, "Sent live data (manual)", kind='TX', payload=msg["payload"]) 
                     seq_num += 1
                 else:
                     # Periodic mode
@@ -221,7 +435,7 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                     msg["payload"] = build_payloads(sensors)
 
                     await websocket.send(json.dumps(msg))
-                    log(f"[Node {node_id}] Sent live data")
+                    LOGGER.node(node_id, "Sent live data", kind='TX', payload=msg["payload"])
 
                     # Receiver runs in background; no foreground recv needed
 
@@ -238,13 +452,13 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                 disconnect_msg = build_base_message(MSG_TYP_DISCONNECT_REQUEST, node_id, seq_num)
                 try:
                     await websocket.send(json.dumps(disconnect_msg))
-                    log(f"[Node {node_id}] Sent disconnect request (cancel)")
+                    LOGGER.node(node_id, "Sent disconnect request (cancel)", kind='TX')
                 except Exception:
                     pass
                 raise  # re-raise so outer task manager knows
 
     except Exception as e:
-        log(f"[Node {node_id}] Exception: {e}")
+        LOGGER.node(node_id, f"Exception: {e}", kind='ERROR')
         if disconnect_event:
             disconnect_event.set()
 
@@ -258,19 +472,20 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
             except Exception:
                 pass
         if websocket is not None:
-            try:
-                await websocket.close()
-                await websocket.wait_closed()
-                log(f"[Node {node_id}] Connection closed cleanly.")
-            except Exception as e:
-                log(f"[Node {node_id}] Error during final close: {e}")
+                try:
+                    await websocket.close()
+                    await websocket.wait_closed()
+                    LOGGER.node(node_id, "Connection closed cleanly.", kind='INFO')
+                except Exception as e:
+                    LOGGER.node(node_id, f"Error during final close: {e}", kind='ERROR')
 
 class NodeManager:
     def __init__(self, uri, interval, sample_msg, log_enabled):
         self.uri = uri
         self.interval = interval
         self.sample_msg = sample_msg
-        self.node_tasks = {}  # node_id: (task, control_event, disconnect_event, send_event)
+        # node_tasks maps node_id -> (task, control_event, disconnect_event, send_event, event_queue)
+        self.node_tasks = {}  # node_id: (task, control_event, disconnect_event, send_event, event_queue)
         self.lock = asyncio.Lock()
         self.log_enabled = log_enabled
         # Janitor to proactively clean stale/disconnected nodes
@@ -282,7 +497,7 @@ class NodeManager:
             stale = []
             # Collect stale nodes under lock
             async with self.lock:
-                for node_id, (task, _control_event, disconnect_event, _send_event) in list(self.node_tasks.items()):
+                for node_id, (task, _control_event, disconnect_event, _send_event, _event_queue) in list(self.node_tasks.items()):
                     if task.done() or disconnect_event.is_set():
                         # Remove from registry; we'll await outside of lock
                         self.node_tasks.pop(node_id, None)
@@ -342,10 +557,11 @@ class NodeManager:
                 control_event.set()  # Start as active
                 disconnect_event = asyncio.Event()
                 send_event = asyncio.Event()
+                event_queue = asyncio.Queue()
                 task = asyncio.create_task(
-                    simulate_node(self.uri, node_id, self.interval, self.sample_msg, control_event, self.log_enabled, disconnect_event, send_event)
+                    simulate_node(self.uri, node_id, self.interval, self.sample_msg, control_event, self.log_enabled, disconnect_event, send_event, event_queue)
                 )
-                self.node_tasks[node_id] = (task, control_event, disconnect_event, send_event)
+                self.node_tasks[node_id] = (task, control_event, disconnect_event, send_event, event_queue)
                 print(f"Node {node_id} added and started.")
 
     async def remove_node(self, *node_ids):
@@ -355,7 +571,7 @@ class NodeManager:
                 if node_id not in self.node_tasks:
                     print(f"Node {node_id} does not exist.")
                     continue
-                task, _, disconnect_event, _ = self.node_tasks.pop(node_id)
+                task, _, disconnect_event, _, _ = self.node_tasks.pop(node_id)
                 disconnect_event.set()  # signal node to disconnect
                 to_remove.append((node_id, task))
 
@@ -378,7 +594,7 @@ class NodeManager:
                 if node_id not in self.node_tasks:
                     print(f"Node {node_id} does not exist.")
                     continue
-                _, control_event, _, _ = self.node_tasks[node_id]
+                _, control_event, _, _, _ = self.node_tasks[node_id]
                 control_event.clear()
                 print(f"Node {node_id} paused.")
 
@@ -388,7 +604,7 @@ class NodeManager:
                 if node_id not in self.node_tasks:
                     print(f"Node {node_id} does not exist.")
                     continue
-                _, control_event, _, _ = self.node_tasks[node_id]
+                _, control_event, _, _, _ = self.node_tasks[node_id]
                 control_event.set()
                 print(f"Node {node_id} resumed.")
 
@@ -405,7 +621,7 @@ class NodeManager:
                 if node_id not in self.node_tasks:
                     print(f"Node {node_id} does not exist.")
                     continue
-                task, control_event, _, _ = self.node_tasks[node_id]
+                task, control_event, _, _, _ = self.node_tasks[node_id]
                 status = "active" if control_event.is_set() else "paused"
                 print(f"Node {node_id} status: {status}, task done: {task.done()}")
 
@@ -435,7 +651,7 @@ class NodeManager:
             if node_id not in self.node_tasks:
                 print(f"Node {node_id} does not exist.")
                 return
-            task, control_event, disconnect_event, send_event = self.node_tasks[node_id]
+            task, control_event, disconnect_event, send_event, event_queue = self.node_tasks[node_id]
             if not control_event.is_set():
                 print(f"Node {node_id} is paused/inactive. Resume it before sending.")
                 return
@@ -445,17 +661,99 @@ class NodeManager:
             send_event.set()
             print(f"Triggered one-shot send for node {node_id}.")
 
+    async def queue_event(self, node_id: int, event_msg: dict):
+        """Queue a pre-built event message for a node to send as soon as possible.
+
+        The event_msg should already be a fully-formed JSON-serializable dict (e.g., from
+        build_event_message())."""
+        async with self.lock:
+            if node_id not in self.node_tasks:
+                print(f"Node {node_id} does not exist.")
+                return
+            _, control_event, disconnect_event, _, event_queue = self.node_tasks[node_id]
+            if disconnect_event.is_set():
+                print(f"Node {node_id} is disconnected; cannot queue event.")
+                return
+            await event_queue.put(event_msg)
+            print(f"Queued event for node {node_id}.")
+
+    async def queue_door_event(self, node_id: int, door_states):
+        # Build event payload with door_state_0..door_state_{DOOR_COUNT-1} keys.
+        # Accept door_states as list of states (strings like 'OPEN'/'CLOSE' or numeric values).
+        async with self.lock:
+            if node_id not in self.node_tasks:
+                print(f"Node {node_id} does not exist.")
+                return
+            task, control_event, disconnect_event, send_event, event_queue = self.node_tasks[node_id]
+            if disconnect_event.is_set():
+                print(f"Node {node_id} is disconnected; cannot queue event.")
+                return
+
+            payload = {}
+            for i in range(DOOR_COUNT):
+                key = f"door_state_{i}"
+                if i < len(door_states):
+                    v = door_states[i]
+                    # Normalize common string inputs
+                    if isinstance(v, str):
+                        vs = v.strip().upper()
+                        if vs in ("OPEN", "OPEN\r", "OPEN\n"):
+                            payload[key] = "OPEN"
+                        elif vs in ("CLOSE", "CLOSED", "CLOSE\r"):
+                            payload[key] = "CLOSE"
+                        else:
+                            # leave as provided (hub will normalize or interpret)
+                            payload[key] = v
+                    else:
+                        # numeric value
+                        payload[key] = int(v)
+                else:
+                    # Not provided → leave absent (hub treats missing as unknown)
+                    # but put explicit "UNKNOWN" for clarity
+                    payload[key] = "UNKNOWN"
+
+            ev = build_event_message(node_id, 0, MSG_EVENT_DOOR, payload)
+            await event_queue.put(ev)
+            print(f"Queued door event for node {node_id} (door count {DOOR_COUNT}).")
+
+    async def queue_service_event(self, node_id: int, service_name: str, **kwargs):
+        desc = build_service_event_descriptor(service_name, **kwargs)
+        async with self.lock:
+            if node_id not in self.node_tasks:
+                print(f"Node {node_id} does not exist.")
+                return
+            ev = build_event_message(node_id, 0, MSG_EVENT_SERVICE, desc)
+            _, _, disconnect_event, _, event_queue = self.node_tasks[node_id]
+            if disconnect_event.is_set():
+                print(f"Node {node_id} is disconnected; cannot queue service event.")
+                return
+            await event_queue.put(ev)
+            print(f"Queued service event '{service_name}' for node {node_id}.")
+
 
 async def cli_loop(node_manager, log_enabled):
-    print("\nCommands: add <id> [<id>...], remove <id> [<id>...], pause <id> [<id>...], resume <id> [<id>...], status <id> [<id>...], list, sd <id> [<id>...], wipe, exit, done")
+    print("\nCommands: add <id> [<id>...], remove <id> [<id>...], pause <id> [<id>...], resume <id> [<id>...], status <id> [<id>...], list, sd <id> [<id>...], ev <id> door <state> [<state>...], sev <id> <service> [key=value ...], wipe, exit, done")
     print("<id>: Node ID(s) to be managed (space-separated)")
     print("list: List all nodes and their status")
     print("wipe: Remove all nodes")    
     print("done: Resume log printing")
     print("exit: Exit the tester completely")
     loop = asyncio.get_event_loop()
+    session = None
+    if _HAS_PROMPT_TOOLKIT:
+        style = Style.from_dict({'prompt': 'ansicyan bold'})
+        session = PromptSession('> ', history=InMemoryHistory(), style=style)
+
     while True:
-        cmd = await loop.run_in_executor(None, sys.stdin.readline)
+        if session is not None:
+            # prompt_toolkit async prompt
+            try:
+                cmdline = await session.prompt_async()
+            except (EOFError, KeyboardInterrupt):
+                cmdline = ''
+        else:
+            cmdline = await loop.run_in_executor(None, sys.stdin.readline)
+        cmd = cmdline
         if not cmd:
             continue
         cmd = cmd.strip().split()
@@ -492,6 +790,32 @@ async def cli_loop(node_manager, log_enabled):
                     await node_manager.send_data(nid)
         elif action == "list":
             await node_manager.list_nodes()
+        elif action == "ev" and len(cmd) >= 3:
+            # ev <node_id> door <state> [<state>...]
+            try:
+                node_id = int(cmd[1])
+            except ValueError:
+                print("Invalid node id for ev command")
+                continue
+            if cmd[2].lower() != 'door':
+                print("Only 'door' kind supported for ev. Use 'sev' for service events.")
+                continue
+            door_states = cmd[3:] if len(cmd) > 3 else ['open']
+            await node_manager.queue_door_event(node_id, door_states)
+        elif action == "sev" and len(cmd) >= 3:
+            # sev <node_id> <service> [key=value ...]
+            try:
+                node_id = int(cmd[1])
+            except ValueError:
+                print("Invalid node id for sev command")
+                continue
+            service_name = cmd[2]
+            kv = {}
+            for pair in cmd[3:]:
+                if '=' in pair:
+                    k, v = pair.split('=', 1)
+                    kv[k] = v
+            await node_manager.queue_service_event(node_id, service_name, **kv)
         elif action == "wipe":
             await node_manager.shutdown()
             break
@@ -515,6 +839,10 @@ async def main(uri, num_nodes, interval):
     log_enabled = asyncio.Event()
     log_enabled.set()
     node_manager = NodeManager(uri, interval, sample_msg, log_enabled)
+    LOGGER.set_enabled_event(log_enabled)
+    # Spinner control
+    spinner_stop = asyncio.Event()
+    spinner = asyncio.create_task(_spinner_task(spinner_stop))
     # Start initial nodes
     for i in range(num_nodes):
         await node_manager.add_node(i)
@@ -530,6 +858,11 @@ async def main(uri, num_nodes, interval):
             continue
         if cmd.strip().lower() == 'exit':
             print("Exiting the tester.")
+            spinner_stop.set()
+            try:
+                await asyncio.wait_for(spinner, timeout=1.0)
+            except asyncio.TimeoutError:
+                spinner.cancel()
             await node_manager.shutdown()
             break
         if cmd.strip().lower() == 'cmd':
@@ -538,6 +871,11 @@ async def main(uri, num_nodes, interval):
             await cli_loop(node_manager, log_enabled)
             print("--- Log printing resumed. Type 'cmd' to enter command mode again, or 'exit' to fully quit. ---\n")
         elif cmd.strip().lower() == 'quit':
+            spinner_stop.set()
+            try:
+                await asyncio.wait_for(spinner, timeout=1.0)
+            except asyncio.TimeoutError:
+                spinner.cancel()
             await node_manager.shutdown()
             break
 

@@ -1,0 +1,4 @@
+# Optional dependencies for the interactive test node UI
+# Install with: python -m pip install -r test/requirements.txt
+colorama>=0.4.6
+prompt_toolkit>=3.0.36

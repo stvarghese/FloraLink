@@ -3,8 +3,8 @@
 const char MSG_TYP_CONNECT[] = "connect";
 const char MSG_TYP_CONNECT_RESPONSE[] = "connect_response";
 const char MSG_TYP_NODE_DATA[] = "node_data";
+const char MSG_TYP_NODE_EVENT[] = "node_event";
 const char MSG_TYP_SUBSCRIBE[] = "notify_subscription";
-const char MSG_TYP_POLL_DATA[] = "poll_data";
 const char MSG_TYP_OTA_REQUEST[] = "ota_request";
 const char MSG_TYP_OTA_STATUS[] = "ota_status";
 const char MSG_TYP_DIAGNOSTIC[] = "diagnostics";

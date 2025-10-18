@@ -58,7 +58,8 @@
 			"esp_heap_caps.h": "c",
 			"esp_sleep.h": "c",
 			"webserver.h": "c",
-			"rmt_rx.h": "c"
+			"rmt_rx.h": "c",
+			"nodeio_lut.h": "c"
 		},
 		"powershell.cwd": "FloraLink"
 	}

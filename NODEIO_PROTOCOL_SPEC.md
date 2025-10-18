@@ -228,7 +228,62 @@ Additional fields MAY be present based on message type:
     "seq_num": 5,
     "timestamp": 1733338000
 }
+
+### 3.3.3 Node Event (`node_event`) - Sporadic / Event-driven data
+**Direction**: Node → Hub  
+**Purpose**: Transmit immediate, event-driven sensor/service data (for example: door open/close, button press).
+
+Format notes:
+- `node_event` messages use the same base envelope (see Section 2.1).
+- Unlike `node_data` (an array), `node_event` carries a single JSON object in `payload` describing the event.
+- A required string field `event_type` indicates the event kind (e.g. `"EVENT_DOOR"`).
+- Event-specific fields are encoded as named properties within the `payload` object (for arrays of per-element values the naming convention is `<name>_0`, `<name>_1`, ...).
+
+Example: multiple door events
+```json
+{
+    "magic": 3203391147,
+    "type": "node_event",
+    "node_id": 1,
+    "seq_num": 42,
+    "timestamp": 12345678,
+    "payload": {
+        "event_type": "EVENT_DOOR",
+        "door_state_0": "OPEN",
+        "door_state_1": "CLOSE",
+        "door_state_2": "OPEN"
+    }
+}
 ```
+
+Example: single door event
+```json
+{
+    "magic": 3203391147,
+    "type": "node_event",
+    "node_id": 1,
+    "seq_num": 43,
+    "timestamp": 12345679,
+    "payload": {
+        "event_type": "EVENT_DOOR",
+        "door_state_0": "CLOSE"
+    }
+}
+```
+
+Rules and hub behavior (current implementation)
+- The hub expects `event_type` to be a string and dispatches handling based on that value.
+- For `EVENT_DOOR` the hub looks up a sensor LUT entry named `"door_state"` (this LUT describes capability flag, element count and whether the field is sporadic).
+- The hub will only accept and persist an event if the node advertises the corresponding capability (the node's capability mask contains the LUT flag).
+- The hub will also verify the LUT declares the field as sporadic (FIELD_LOC_SPORADIC). If the LUT does not mark the field sporadic, the event is rejected.
+- Door-state elements are clamped to the LUT-declared `elem_count`. Missing elements are treated as "unknown"; string values like `"OPEN"`/`"CLOSE"` or numeric values are accepted and normalized by the hub.
+- Sporadic/event writes are stored in the message's `sporadic_data` area (separate from the periodic payload array) so incoming events do not overwrite periodic `node_data` slots.
+
+Notes on acceptance policy
+- The hub accepts `node_event` messages based on the node's advertised capability mask: if the node claims the capability (the capability flag in its connect message), the hub will parse and persist the event (subject to LUT validation). The hub does not require a separate server-side subscription mask to accept event payloads. This keeps the hub implementation simple and relies on the node to only send events for which the hub previously requested delivery via the subscription handshake.
+
+Extensibility
+- Add new event types by defining an `event_type` string and a corresponding LUT entry for the event's named fields (name, capability flag, elem_count, and `FIELD_LOC_SPORADIC` if appropriate). Update both node and hub LUTs so parsing/serialization remain in sync.
 
 ### 3.4 Service Messages
 
@@ -576,3 +631,51 @@ def build_connect_message(node_id, seq_num):
 **Last Updated**: December 2024  
 **Authors**: FloraLink Development Team  
 **License**: Project-specific documentation
+
+### Appendix D: Unified LUT (lookup-table) mechanism
+
+Overview
+- The project uses compact, compile-time lookup tables (LUTs) for sensors and
+    services to map JSON key names to the byte offsets and types inside the
+    packed `protocol_msg_t` structures. This keeps parsing code small and
+    fast: parsers discover the target field via a string lookup and then copy
+    the typed value directly into the correct memory location.
+
+Why a LUT?
+- Reduces parsing boilerplate and duplicate code for each field
+- Centralizes field metadata (name, capability bit, type, location, offset)
+- Enables uniform helper APIs (`nodeio_set_sensor_lut_field`,
+    `nodeio_set_service_lut_struct_from_json`, `nodeio_get_sensor_lut_field`)
+
+Risks and safety
+- LUTs are low-level and rely on correct offsets. If you change the
+    underlying struct layout, the LUT entries must be updated accordingly.
+- Incorrect offsets or types can silently corrupt adjacent memory — always
+    prefer the provided helpers and avoid manual pointer arithmetic elsewhere.
+- LUT names are part of the node↔hub JSON contract. Renaming a key requires
+    coordinated updates to node firmware and tests.
+
+Maintenance checklist (recommended)
+1. Add field to payload struct(s) (e.g., `sensor_payload_t` or
+     `sporadic_sensor_payload_t`).
+2. Update the corresponding LUT entry in `main/nodeio_sensors.c` or
+     `main/nodeio_services.c` using `offsetof()` for the new offset.
+3. If the field is an array, set `elem_count` appropriately and choose
+     `FIELD_LOC_PERIODIC` or `FIELD_LOC_SPORADIC` correctly.
+4. Add unit tests or testnode scenarios exercising the new key.
+5. Update the documentation (this file) and any node implementations.
+
+Helpers to use
+- nodeio_find_sensors_lut_field_by_name(name) — lookup LUT entry by JSON key
+- nodeio_set_sensor_lut_field(p_msg, payload_index, name, index, src) — safe write
+- nodeio_get_sensor_lut_field(p_msg, payload_index, name, index, dst, dst_size) — safe read
+- nodeio_set_service_lut_struct_from_json(...) — parse and set structured services
+- nodeio_serialize_service_lut(...) — compact service serializer for UI
+
+Developer notes
+- Keep LUT entries in alphabetical order where practical to make diffs and
+    reviews easier.
+- Avoid changing offsets manually; prefer reordering fields in the struct and
+    using `offsetof()` to compute offsets.
+- Consider adding static assertions or small unit tests that validate the
+    expected offsets for critical fields after structural changes.

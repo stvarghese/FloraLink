@@ -37,10 +37,10 @@ static const field_lookup_t sensors_unified_lut[] = {
     {"humidity", CAP_HUMIDITY, FIELD_TYPE_FLOAT, FIELD_LOC_PERIODIC, offsetof(sensor_payload_t, humidity), 0},
     {"distance", CAP_DISTANCE, FIELD_TYPE_FLOAT, FIELD_LOC_PERIODIC, offsetof(sensor_payload_t, distance), 0},
     {"light", CAP_LIGHTSENSE, FIELD_TYPE_FLOAT, FIELD_LOC_PERIODIC, offsetof(sensor_payload_t, light), 0},
-    /* Sporadic fields: door_state is an array stored in sporadic area */
-    {"door_state", CAP_DOORSENSE, FIELD_TYPE_UINT8_ARRAY, FIELD_LOC_SPORADIC, offsetof(sporadic_sensor_payload_t, data.door.door_state[0]), NUM_DOOR_SENSORS},
-    {"button_pressed", CAP_ALERT, FIELD_TYPE_BOOL, FIELD_LOC_SPORADIC, offsetof(sporadic_sensor_payload_t, data.button.button_pressed), 0},
-    {"motion_detected", CAP_ALERT, FIELD_TYPE_BOOL, FIELD_LOC_SPORADIC, offsetof(sporadic_sensor_payload_t, data.motion.motion_detected), 0},
+    /* Sporadic fields: doorsense (door_state array) is stored in sporadic area */
+    {"doorsense", CAP_DOORSENSE, FIELD_TYPE_UINT8_ARRAY, FIELD_LOC_SPORADIC, offsetof(sporadic_sensor_payload_t, data.door.door_state[0]), NUM_DOOR_SENSORS},
+    // {"button_pressed", CAP_ALERT, FIELD_TYPE_BOOL, FIELD_LOC_SPORADIC, offsetof(sporadic_sensor_payload_t, data.button.button_pressed), 0},
+    // {"motion_detected", CAP_ALERT, FIELD_TYPE_BOOL, FIELD_LOC_SPORADIC, offsetof(sporadic_sensor_payload_t, data.motion.motion_detected), 0},
 };
 
 /* Public accessors - keep these simple so callers don't need to know the LUT

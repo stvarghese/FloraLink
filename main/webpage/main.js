@@ -101,7 +101,7 @@ function fetchStats() {
 window.configPanelsOpen = {};
 
 // Nodes panel
-function fetchNodes() {
+async function fetchNodes() {
     const panel = document.getElementById('nodesPanel');
     if (!panel) return;
 
@@ -111,7 +111,7 @@ function fetchNodes() {
     loadPersistedState();
     fetch('/nodeslist')
         .then(r => r.json())
-        .then(nodes => {
+        .then(async nodes => {
             if (!window.nodeTimes) window.nodeTimes = {};
             if (!window.knownNodes) window.knownNodes = {};
 
@@ -141,6 +141,18 @@ function fetchNodes() {
             }
 
             const combined = [];
+            // Fetch LUTs once per fetchNodes call so rendering can use them.
+            // Use promise chaining instead of await to avoid await in non-async contexts.
+            let _luts = null;
+            if (!window._flut_cache_promise) {
+                window._flut_cache_promise = fetch('/luts').then(r => r.json()).catch(() => null);
+            }
+            try {
+                // resolve synchronously via then; this keeps the surrounding code non-async
+                _luts = await window._flut_cache_promise;
+            } catch (e) {
+                _luts = null;
+            }
             if (Array.isArray(nodes)) combined.push(...nodes);
             for (const idStr of Object.keys(window.knownNodes)) {
                 const id = parseInt(idStr, 10);
@@ -222,41 +234,74 @@ function fetchNodes() {
                     const capMask = Number(node.cap_mask || 0);
                     const subMask = Number(node.sub && node.sub.mask ? node.sub.mask : 0);
                     const intval = Math.round(Number(node.sub && node.sub.interval_ms ? node.sub.interval_ms : 5000) / 1000); // seconds
-                    // Build checkbox lists dynamically from known bit positions (must match firmware enum)
-                    const caps = [
-                        { bit: 0, name: 'Temperature' },
-                        { bit: 1, name: 'Moisture' },
-                        { bit: 2, name: 'Humidity' },
-                        { bit: 3, name: 'Distance' },
-                        { bit: 4, name: 'Light' },
-                        { bit: 7, name: 'Diagnostics', service: true },
-                        { bit: 8, name: 'OTA', service: true }
-                    ];
                     let sensorsHtml = '';
                     let servicesHtml = '';
-                    caps.forEach(c => {
-                        const bitMask = (1 << c.bit) >>> 0;
-                        if (!(capMask & bitMask)) return; // skip unsupported
-                        const checked = (subMask & bitMask) ? 'checked' : '';
-                        const item = `<label><input class='cap-checkbox' data-node='${node.id}' data-bit='${c.bit}' type='checkbox' ${checked}> ${c.name}</label>`;
-                        if (c.service) servicesHtml += item; else sensorsHtml += item;
-                    });
+                    try {
+                        const luts = _luts;
+                        if (luts) {
+                            const periodic = (luts.sensors || []).filter(s => s.loc === 0);
+                            const eventdriven = (luts.sensors || []).filter(s => s.loc !== 0);
+                            const sv = (luts.services || []);
+
+                            // Render checkboxes for LUT entries. Show entries even if the node
+                            // doesn't advertise the capability; mark them disabled so user
+                            // understands what's available globally but not supported by this node.
+                            const renderCheckbox = (entry, isService) => {
+                                const bitIndex = Math.log2(entry.cap_mask) | 0; // cap_mask is power of two
+                                const bitMask = (1 << bitIndex) >>> 0;
+                                const supported = !!(capMask & bitMask);
+                                const checked = (subMask & bitMask) ? 'checked' : '';
+                                const disabled = supported ? '' : 'disabled';
+                                const name = lutNameToLabel(entry.name);
+                                const cls = supported ? '' : 'cap-unsupported';
+                                return `<label class='${cls}'><input class='cap-checkbox' data-node='${node.id}' data-bit='${bitIndex}' type='checkbox' ${checked} ${disabled}> ${name}</label>`;
+                            };
+
+                            if (periodic.length > 0) {
+                                sensorsHtml += `<div class='cap-subtitle'>Periodic</div>`;
+                                periodic.forEach(e => { sensorsHtml += renderCheckbox(e, false); });
+                            }
+                            if (eventdriven.length > 0) {
+                                sensorsHtml += `<div class='cap-subtitle'>Event driven</div>`;
+                                eventdriven.forEach(e => { sensorsHtml += renderCheckbox(e, false); });
+                            }
+
+                            // Split services into periodic vs event-driven if LUT provides loc
+                            const sv_periodic = (sv || []).filter(s => (s.loc === 0));
+                            const sv_event = (sv || []).filter(s => (s.loc !== 0));
+                            if (sv_periodic.length > 0) {
+                                servicesHtml += `<div class='cap-subtitle'>Periodic</div>`;
+                                sv_periodic.forEach(e => { servicesHtml += renderCheckbox(e, true); });
+                            }
+                            if (sv_event.length > 0) {
+                                servicesHtml += `<div class='cap-subtitle'>Event driven services</div>`;
+                                sv_event.forEach(e => { servicesHtml += renderCheckbox(e, true); });
+                            }
+                        }
+                    } catch (e) {
+                        sensorsHtml = '<span style="color:#888">None</span>';
+                        servicesHtml = '<span style="color:#888">None</span>';
+                    }
                     const maskHex = '0x' + (subMask >>> 0).toString(16);
+                    // A more compact, clearer subscription/config panel
                     html += `<div class='node-config' id='cfg-${node.id}'>
-                               <div class='cap-groups'>
-                                 <div>
-                                   <div class='cap-group-title'>Sensors:</div>
-                                   <div class='cap-list'>${sensorsHtml || '<span style="color:#888">None</span>'}</div>
-                                 </div>
-                                 <div>
-                                   <div class='cap-group-title'>Services:</div>
-                                   <div class='cap-list'>${servicesHtml || '<span style="color:#888">None</span>'}</div>
-                                 </div>
-                               </div>
-                               <label>Data Interval (s): <input class='interval-input' type='number' min='1' max='60' step='1' value='${intval}' data-node='${node.id}'></label>
-                               <div class='mask-row'>Mask: <span id='mask-${node.id}'>${maskHex}</span></div>
-                               <button class='apply-sub' data-node='${node.id}'>Apply</button>
-                             </div>`;
+                                                             <div class='cap-groups two-column'>
+                                                                 <div class='cap-column'>
+                                                                     <div class='cap-group-title'>Sensors</div>
+                                                                     <div class='cap-list compact'>${sensorsHtml || '<span style="color:#888">None</span>'}</div>
+                                                                 </div>
+                                                                 <div class='cap-column'>
+                                                                     <div class='cap-group-title'>Services</div>
+                                                                     <div class='cap-list compact'>${servicesHtml || '<span style="color:#888">None</span>'}</div>
+                                                                 </div>
+                                                             </div>
+                                                             <div class='cfg-row'>
+                                                                 <label class='cfg-interval'>Data Interval (s): <input class='interval-input' type='number' min='1' max='60' step='1' value='${intval}' data-node='${node.id}'></label>
+                                                                 <div class='mask-row'>Mask: <span id='mask-${node.id}' class='mask-val'>${maskHex.toUpperCase()}</span></div>
+                                                             </div>
+                                                             <div class='cfg-help' style='color:#666; font-size:0.9em; margin:8px 0;'>Select which sensors/services the node should report. Event-driven sensors (like door_state) are sent as events; periodic sensors are included in telemetry.</div>
+                                                             <div class='cfg-actions'><button class='apply-sub' data-node='${node.id}'>Apply</button><span class='apply-status' id='status-${node.id}' style='margin-left:10px; font-size:0.95em; color:#1976d2; display:none;'>Applying...</span></div>
+                                                         </div>`;
                 }
                 html += `</div>`;
             });
@@ -303,11 +348,15 @@ function fetchNodes() {
             panel.querySelectorAll('.apply-sub').forEach(btn => {
                 btn.addEventListener('click', () => {
                     const id = btn.getAttribute('data-node');
+                    const statusEl = document.getElementById('status-' + id);
                     const mask = recomputeMask(id);
                     const intervalEl = panel.querySelector(`.interval-input[data-node='${id}']`);
                     const intervalSec = intervalEl ? parseInt(intervalEl.value || '5', 10) : 5;
                     const intervalMs = intervalSec * 1000;
                     const body = `node_id=${encodeURIComponent(id)}&mask=${mask}&interval_ms=${intervalMs}`;
+                    // Disable button and show status
+                    btn.disabled = true;
+                    if (statusEl) { statusEl.style.display = 'inline'; statusEl.textContent = 'Applying...'; }
                     fetch('/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body })
                         .then(r => r.json()).then(_ => {
                             // collapse panel and allow refresh
@@ -316,7 +365,11 @@ function fetchNodes() {
                             window.configPanelsOpen[id] = false;
                             // trigger immediate refresh
                             fetchNodes();
-                        }).catch(() => {/* ignore */ });
+                        }).catch(() => {/* ignore */ })
+                        .finally(() => {
+                            btn.disabled = false;
+                            if (statusEl) { statusEl.style.display = 'none'; }
+                        });
                 });
             });
 
@@ -376,6 +429,20 @@ function formatDateTime(dt) {
     let d = new Date(dt);
     if (isNaN(d)) return String(dt);
     return d.toLocaleDateString() + ', ' + d.toLocaleTimeString();
+}
+
+// Helper to make a human-friendly label from LUT name
+function lutNameToLabel(name) {
+    // explicit overrides for special cases
+    const overrides = {
+        'doorsense': 'Door state'
+    };
+    if (overrides[name]) return overrides[name];
+
+    // replace underscores with spaces and Title Case each word
+    return name.split('_').map(function (part) {
+        return part.charAt(0).toUpperCase() + part.slice(1);
+    }).join(' ');
 }
 
 // Periodically update nodesPanel if present

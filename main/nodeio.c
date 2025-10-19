@@ -25,6 +25,7 @@ typedef struct
     bool subscription_update;        // Track if subscription parameters were updated
     int64_t node_uptime_start;       // Timestamp when node connected
     int64_t node_uptime;             // Node uptime in seconds
+    int64_t last_uptime_log_ts;      // Timestamp (seconds) when uptime was last logged
 } node_context_t;
 
 static node_context_t node_contexts[MAX_NODES] = {0};
@@ -127,7 +128,7 @@ void nodeio_active_nodes_ping(void)
             int client_fd = node_contexts[i].p_session->client_fd;
             if (client_fd != -1)
             {
-                ESP_LOGD(TAG, "Pinging node id %d on client_fd %d", node_contexts[i].p_node->node_id, client_fd);
+                // Suppress noisy per-ping debug logging; keep the ping action.
                 websockserver_ping(client_fd);
             }
         }
@@ -165,7 +166,9 @@ static inline capability_t nodeio_build_node_capmask_sensors(cJSON *sensors, cap
                 size_t s_count = nodeio_get_sensors_lut_count();
                 for (size_t s = 0; s < s_count; ++s)
                 {
-                    if (strcmp(sensor_name, s_lut[s].name) == 0)
+                    /* Accept legacy alias 'door_state' as equivalent to LUT name 'doorsense' */
+                    if (strcmp(sensor_name, s_lut[s].name) == 0 ||
+                        (strcmp(sensor_name, "door_state") == 0 && strcmp(s_lut[s].name, "doorsense") == 0))
                     {
                         current_mask |= s_lut[s].cap;
                         break;
@@ -393,17 +396,17 @@ static inline esp_err_t nodeio_parse_sporadic_event(protocol_msg_t *p_msg, cJSON
     {
         /* Use the sensors LUT to validate the field and element count, and to
            drive the write into sporadic storage via nodeio_set_sensor_lut_field(). */
-        const field_lookup_t *fld = nodeio_find_sensors_lut_field_by_name("door_state");
+        const field_lookup_t *fld = nodeio_find_sensors_lut_field_by_name("doorsense");
         if (!fld)
         {
-            ESP_LOGW(TAG, "No LUT entry for sporadic sensor 'door_state'");
+            ESP_LOGW(TAG, "No LUT entry for sporadic sensor 'doorsense'");
             return ESP_FAIL;
         }
 
         /* If node doesn't advertise capability, ignore the event silently. */
         if (!(node_cap_mask & fld->cap))
         {
-            ESP_LOGD(TAG, "Node capability does not include 'door_state', ignoring event");
+            ESP_LOGD(TAG, "Node capability does not include 'doorsense', ignoring event");
             return ESP_OK;
         }
 
@@ -412,16 +415,16 @@ static inline esp_err_t nodeio_parse_sporadic_event(protocol_msg_t *p_msg, cJSON
 
         if (fld->loc != FIELD_LOC_SPORADIC)
         {
-            ESP_LOGW(TAG, "LUT entry for 'door_state' not marked sporadic, refusing to write into sporadic area");
+            ESP_LOGW(TAG, "LUT entry for 'doorsense' not marked sporadic, refusing to write into sporadic area");
             return ESP_FAIL;
         }
 
-        /* Count present door_state_N keys and clamp to declared elem_count */
+        /* Count present doorsense_N or legacy door_state_N keys and clamp to declared elem_count */
         int field_count = 0;
         cJSON *current_item = msg_payload->child;
         while (current_item)
         {
-            if (current_item->string && strncmp(current_item->string, "door_state_", 11) == 0)
+            if (current_item->string && (strncmp(current_item->string, "doorsense_", 10) == 0 || strncmp(current_item->string, "door_state_", 11) == 0))
                 field_count++;
             current_item = current_item->next;
         }
@@ -433,8 +436,15 @@ static inline esp_err_t nodeio_parse_sporadic_event(protocol_msg_t *p_msg, cJSON
             /* allocate a slightly larger buffer to satisfy static analyzers for
                large integer values (although elem_count will usually be small) */
             char key[32];
-            snprintf(key, sizeof(key), "door_state_%d", i);
+            /* Prefer canonical key 'doorsense_N', but accept legacy 'door_state_N' if present */
+            char key_alt[32];
+            snprintf(key, sizeof(key), "doorsense_%d", i);
             cJSON *door_state_item = cJSON_GetObjectItem(msg_payload, key);
+            if (!door_state_item)
+            {
+                snprintf(key_alt, sizeof(key_alt), "door_state_%d", i);
+                door_state_item = cJSON_GetObjectItem(msg_payload, key_alt);
+            }
             uint8_t val = 0xFF; // unknown
             if (door_state_item)
             {
@@ -449,9 +459,9 @@ static inline esp_err_t nodeio_parse_sporadic_event(protocol_msg_t *p_msg, cJSON
             }
 
             /* payload_index is ignored for sporadic fields by the helper, pass 0 */
-            if (nodeio_set_sensor_lut_field(p_msg, 0, "door_state", (size_t)i, &val) != NIO_OK)
+            if (nodeio_set_sensor_lut_field(p_msg, 0, "doorsense", (size_t)i, &val) != NIO_OK)
             {
-                ESP_LOGW(TAG, "Failed to set sporadic door_state_%d", i);
+                ESP_LOGW(TAG, "Failed to set sporadic doorsense_%d", i);
             }
         }
         return ESP_OK;
@@ -577,7 +587,7 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
     msg_type_t msg_type = nodeio_type_str_to_enum(type_str);
     p_currentmsg->type = msg_type;
 
-    ESP_LOGD(TAG, "Message type: %s, 0x%02X", type_str, msg_type);
+    ESP_LOGI(TAG, "Message type: %s, 0x%02X", type_str, msg_type);
     // Check if the message type is valid
     if (msg_type == MSG_UNKNOWN)
     {
@@ -605,6 +615,8 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
                 node_contexts[node_id].node_uptime_start = esp_timer_get_time() / 1000000; // in seconds
                 // Reset node uptime
                 node_contexts[node_id].node_uptime = 0;
+                // Reset last uptime log timestamp so we will log promptly after connect
+                node_contexts[node_id].last_uptime_log_ts = 0;
                 // Successfully connected, send response
                 nodeio_send_connect_response(client_fd, seq_num);
                 // Trigger initial subscription update
@@ -1022,6 +1034,7 @@ static void nodeio_handle_disconnect(int client_fd, uint8_t node_id)
         node_contexts[node_id].node_uptime = (esp_timer_get_time() / 1000000) - node_contexts[node_id].node_uptime_start; // in seconds
         ESP_LOGI(TAG, "Node %d disconnected, uptime: %lld seconds", node_id, node_contexts[node_id].node_uptime);
         node_contexts[node_id].node_uptime_start = 0; // Reset start time
+        node_contexts[node_id].last_uptime_log_ts = 0;
     }
     else
     {
@@ -1210,7 +1223,14 @@ void nodeio_monitor_nodeslist(void)
                     snprintf(uptime_str, sizeof(uptime_str), "%02d:%02d", mm, ss);
                 else
                     snprintf(uptime_str, sizeof(uptime_str), "%02d", ss);
-                ESP_LOGI(TAG, "Node %d uptime: %s", i, uptime_str);
+
+                /* Throttle uptime logging to at most once per 60 seconds per node */
+                int64_t now_s = esp_timer_get_time() / 1000000;
+                if (node_contexts[i].last_uptime_log_ts == 0 || (now_s - node_contexts[i].last_uptime_log_ts) >= 60)
+                {
+                    ESP_LOGI(TAG, "Node %d uptime: %s", i, uptime_str);
+                    node_contexts[i].last_uptime_log_ts = now_s;
+                }
             }
             else
             {
@@ -1233,7 +1253,11 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
 
     // ESP_LOGD(TAG, "nodeio_publish_nodeslist called");
 
-    offset += snprintf(json + offset, json_size - offset, "[");
+    /* Start JSON array. Use remaining-size guarded snprintf calls below. */
+    if (json_size > 0)
+        offset += snprintf(json + offset, json_size - offset, "[");
+    else
+        offset = 0;
 
     int first_node = 1;
 
@@ -1249,7 +1273,13 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
         {
             node_count++;
             if (!first_node)
-                offset += snprintf(json + offset, json_size - offset, ",");
+            {
+                int rem = (int)(json_size - offset);
+                if (rem > 0)
+                    offset += snprintf(json + offset, rem, ",");
+                else
+                    break; // no space left
+            }
             first_node = 0;
 
             int64_t uptime = ctx->node_uptime;
@@ -1260,12 +1290,26 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
             // placeholders reserved for extended summaries (not used in JSON path)
 
             // include capability mask and current subscription state for UI configuration
-            offset += snprintf(json + offset, json_size - offset,
-                               "{\"id\":%d,\"status\":\"%s\",\"uptime_s\":%d,\"cap_mask\":%u,\"sub\":{\"mask\":%u,\"interval_ms\":%u},",
-                               ctx->p_node->node_id, status, uptime_s,
-                               (unsigned)ctx->p_node->capability_mask,
-                               (unsigned)ctx->subscription.subscribe_mask,
-                               (unsigned)ctx->subscription.interval_ms);
+            {
+                int rem = (int)(json_size - offset);
+                if (rem <= 0)
+                    break;
+                int n = snprintf(json + offset, rem,
+                                 "{\"id\":%d,\"status\":\"%s\",\"uptime_s\":%d,\"cap_mask\":%u,\"sub\":{\"mask\":%u,\"interval_ms\":%u},",
+                                 ctx->p_node->node_id, status, uptime_s,
+                                 (unsigned)ctx->p_node->capability_mask,
+                                 (unsigned)ctx->subscription.subscribe_mask,
+                                 (unsigned)ctx->subscription.interval_ms);
+                if (n < 0)
+                    break;
+                if (n >= rem)
+                {
+                    /* Truncated - avoid buffer overflow */
+                    offset += rem - 1;
+                    break;
+                }
+                offset += n;
+            }
 
             // Sensors: output all available from sensors LUT
             int first_sensor = 1;
@@ -1276,71 +1320,199 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
                 {
                     if (!first_sensor)
                     {
-                        offset += snprintf(json + offset, json_size - offset, ",");
+                        int rem = (int)(json_size - offset);
+                        if (rem > 0)
+                            offset += snprintf(json + offset, rem, ",");
+                        else
+                            break;
                     }
                     first_sensor = 0;
                     float fv = 0.0f;
                     if (ctx->p_msg && ctx->p_msg->payload.payload_count > 0 &&
                         nodeio_get_sensor_lut_field(ctx->p_msg, 0, s_lut[s].name, 0, &fv, sizeof(fv)) == NIO_OK)
                     {
-                        offset += snprintf(json + offset, json_size - offset, "\"%s\":%.2f", s_lut[s].name, fv);
+                        {
+                            int rem = (int)(json_size - offset);
+                            if (rem <= 0)
+                                break;
+                            int n = snprintf(json + offset, rem, "\"%s\":%.2f", s_lut[s].name, fv);
+                            if (n < 0)
+                                break;
+                            if (n >= rem)
+                            {
+                                offset += rem - 1;
+                                break;
+                            }
+                            offset += n;
+                        }
                     }
                     else
                     {
-                        offset += snprintf(json + offset, json_size - offset, "\"%s\":null", s_lut[s].name);
+                        int rem = (int)(json_size - offset);
+                        if (rem <= 0)
+                            break;
+                        int n = snprintf(json + offset, rem, "\"%s\":null", s_lut[s].name);
+                        if (n < 0)
+                            break;
+                        if (n >= rem)
+                        {
+                            offset += rem - 1;
+                            break;
+                        }
+                        offset += n;
                     }
                 }
             }
 
             // Services: output all available from services LUT
-            offset += snprintf(json + offset, json_size - offset, ",\"services\":{");
+            {
+                int rem = (int)(json_size - offset);
+                if (rem <= 0)
+                    break;
+                int n = snprintf(json + offset, rem, ",\"services\":{");
+                if (n < 0)
+                    break;
+                if (n >= rem)
+                {
+                    offset += rem - 1;
+                    break;
+                }
+                offset += n;
+            }
             int first_service = 1;
             {
                 const field_lookup_t *sv_lut = nodeio_get_services_lut();
                 size_t sv_count = nodeio_get_services_lut_count();
                 for (size_t s = 0; s < sv_count; ++s)
                 {
-                    if (!first_service)
-                        offset += snprintf(json + offset, json_size - offset, ",");
-                    first_service = 0;
                     char serbuf[256];
+                    bool have_service_output = false;
+
                     if (ctx->p_msg && ctx->p_msg->payload.payload_count > 0 &&
                         nodeio_serialize_service_lut(ctx->p_msg, 0, sv_lut[s].name, serbuf, sizeof(serbuf)) == NIO_S_OK)
                     {
-                        // If service is diagnostics, extract error_code quickly from serialized JSON
-                        if (strcmp(sv_lut[s].name, "diagnostics") == 0)
-                        {
-                            // crude parse: find "error_code":<num>
-                            const char *p = strstr(serbuf, "\"error_code\":");
-                            int errval = 0;
-                            if (p)
-                                (void)sscanf(p, "\"error_code\":%d", &errval);
-                            offset += snprintf(json + offset, json_size - offset, "\"%s\":%d", sv_lut[s].name, errval);
-                        }
-                        else if (strcmp(sv_lut[s].name, "ota") == 0 || strcmp(sv_lut[s].name, "ota_status") == 0)
-                        {
-                            // include stringified service payload
-                            offset += snprintf(json + offset, json_size - offset, "\"%s\":\"%s\"", sv_lut[s].name, serbuf);
-                        }
+                        // We have serializable service data
+                        have_service_output = true;
+                    }
+
+                    if (!have_service_output)
+                    {
+                        // Nothing to emit for this service; skip without writing commas
+                        continue;
+                    }
+
+                    // Emit comma separator only if this is not the first emitted service entry
+                    if (!first_service)
+                    {
+                        int rem = (int)(json_size - offset);
+                        if (rem > 0)
+                            offset += snprintf(json + offset, rem, ",");
                         else
+                            break;
+                    }
+
+                    // Mark that we've emitted at least one service
+                    first_service = 0;
+
+                    // If service is diagnostics, extract error_code quickly from serialized JSON
+                    if (strcmp(sv_lut[s].name, "diagnostics") == 0)
+                    {
+                        const char *p = strstr(serbuf, "\"error_code\":");
+                        int errval = 0;
+                        if (p)
+                            (void)sscanf(p, "\"error_code\":%d", &errval);
+                        int rem = (int)(json_size - offset);
+                        if (rem <= 0)
+                            break;
+                        int n = snprintf(json + offset, rem, "\"%s\":%d", sv_lut[s].name, errval);
+                        if (n < 0)
+                            break;
+                        if (n >= rem)
                         {
-                            offset += snprintf(json + offset, json_size - offset, "\"%s\":true", sv_lut[s].name);
+                            offset += rem - 1;
+                            break;
                         }
+                        offset += n;
+                    }
+                    else if (strcmp(sv_lut[s].name, "ota") == 0 || strcmp(sv_lut[s].name, "ota_status") == 0)
+                    {
+                        /* include service payload as raw JSON (avoid embedding JSON as a quoted string)
+                           nodeio_serialize_service_lut() returns a JSON fragment; insert it directly. */
+                        int rem = (int)(json_size - offset);
+                        if (rem <= 0)
+                            break;
+                        int n = snprintf(json + offset, rem, "\"%s\":%s", sv_lut[s].name, serbuf);
+                        if (n < 0)
+                            break;
+                        if (n >= rem)
+                        {
+                            offset += rem - 1;
+                            break;
+                        }
+                        offset += n;
+                    }
+                    else
+                    {
+                        int rem = (int)(json_size - offset);
+                        if (rem <= 0)
+                            break;
+                        int n = snprintf(json + offset, rem, "\"%s\":true", sv_lut[s].name);
+                        if (n < 0)
+                            break;
+                        if (n >= rem)
+                        {
+                            offset += rem - 1;
+                            break;
+                        }
+                        offset += n;
                     }
                 }
             }
-            offset += snprintf(json + offset, json_size - offset, "}}");
+            {
+                int rem = (int)(json_size - offset);
+                if (rem > 0)
+                    offset += snprintf(json + offset, rem, "}}");
+                else
+                    break;
+            }
         }
     }
 
-    offset += snprintf(json + offset, json_size - offset, "]");
+    if (json_size > 0)
+        offset += snprintf(json + offset, (int)(json_size - offset), "]");
 
     // Ensure null termination within buffer
-    if (offset >= json_size)
-        offset = json_size - 1;
-    json[offset] = '\0';
+    if (offset >= (int)json_size)
+        offset = (int)json_size - 1;
+    if (json_size > 0)
+        json[offset] = '\0';
 
-    // ESP_LOGI(TAG, "nodeio_publish_nodeslist: published %d nodes, JSON length: %d", node_count, offset);
+    ESP_LOGD(TAG, "nodeio_publish_nodeslist: published %d nodes, JSON length: %d (buf %u)", node_count, offset, (unsigned)json_size);
+
+    /* Sanity check: parse the generated JSON to detect formatting issues early */
+    {
+        cJSON *check = cJSON_Parse(json);
+        if (!check)
+        {
+            /* Log a truncated snippet to avoid flooding logs */
+            char snippet[512];
+            int sn = (offset < (int)sizeof(snippet) - 1) ? offset : (int)sizeof(snippet) - 1;
+            if (sn > 0)
+            {
+                memcpy(snippet, json, sn);
+                snippet[sn] = '\0';
+            }
+            else
+            {
+                snippet[0] = '\0';
+            }
+            ESP_LOGE(TAG, "nodeio_publish_nodeslist: JSON parse failed; snippet: %s", snippet);
+        }
+        else
+        {
+            cJSON_Delete(check);
+        }
+    }
 
     HEAP_TRACE_END_DEFAULT();
     return offset;
@@ -1349,7 +1521,8 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
 // Initialize nodeio(websocket) and wait for incoming connection requests
 esp_err_t nodeio_init(void)
 {
-    esp_log_level_set(TAG, ESP_LOG_DEBUG);
+    // Set a less-verbose default log level to avoid noisy debug output in normal operation
+    esp_log_level_set(TAG, ESP_LOG_INFO);
     // Initialize WebSocket server
     ESP_LOGI(TAG, "NodeIO initialized");
     // websockserver_init() already called in webserver_init()

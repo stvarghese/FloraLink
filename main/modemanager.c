@@ -16,6 +16,46 @@
 #define WAKEUP_GPIO_PIN 9              // Onboard flash/boot button (GPIO9 on ESP32-C3 dev boards)
 
 static const char *TAG = "ModeManager";
+// Helper: log a human-readable wakeup reason
+void modemanager_log_wakeup_reason(void)
+{
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    switch (cause)
+    {
+    case ESP_SLEEP_WAKEUP_UNDEFINED:
+        ESP_LOGI(TAG, "Wake reason: UNDEFINED");
+        break;
+    case ESP_SLEEP_WAKEUP_ALL:
+        ESP_LOGI(TAG, "Wake reason: ALL");
+        break;
+    case ESP_SLEEP_WAKEUP_TIMER:
+        ESP_LOGI(TAG, "Wake reason: TIMER");
+        break;
+    case ESP_SLEEP_WAKEUP_TOUCHPAD:
+        ESP_LOGI(TAG, "Wake reason: TOUCHPAD");
+        break;
+    case ESP_SLEEP_WAKEUP_ULP:
+        ESP_LOGI(TAG, "Wake reason: ULP");
+        break;
+    case ESP_SLEEP_WAKEUP_GPIO:
+        ESP_LOGI(TAG, "Wake reason: GPIO (pin=%d)", WAKEUP_GPIO_PIN);
+        break;
+    case ESP_SLEEP_WAKEUP_UART:
+        ESP_LOGI(TAG, "Wake reason: UART");
+        break;
+#if defined(ESP_SLEEP_WAKEUP_WIFI)
+    case ESP_SLEEP_WAKEUP_WIFI:
+        ESP_LOGI(TAG, "Wake reason: WIFI");
+        break;
+#endif
+    case ESP_SLEEP_WAKEUP_COCPU:
+        ESP_LOGI(TAG, "Wake reason: COCPU");
+        break;
+    default:
+        ESP_LOGI(TAG, "Wake reason: OTHER (%d)", cause);
+        break;
+    }
+}
 static TimerHandle_t active_window_timer = NULL;
 static volatile int is_active = 0;
 static uint32_t active_window_ms = ACTIVE_WINDOW_DEFAULT_MS;
@@ -163,15 +203,9 @@ void modemanager_exit_active(void)
     esp_light_sleep_start();
 
     // Check what woke us up
-    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    if (cause == ESP_SLEEP_WAKEUP_GPIO)
-    {
-        ESP_LOGI(TAG, "Woke from light sleep by GPIO %d", WAKEUP_GPIO_PIN);
-    }
-    else
-    {
-        ESP_LOGI(TAG, "Woke from light sleep by cause %d", cause);
-    }
+    // Centralized human-readable wakeup logging
+    extern void modemanager_log_wakeup_reason(void);
+    modemanager_log_wakeup_reason();
 
     // signal wakeup with LED pattern
     onboardled_signal_code(2, 150, 100, 500, &ONBOARDLED_COLOR_GREEN); // 2 green flashes = "woke up"
@@ -229,6 +263,10 @@ void modemanager_enter_active_auto(void)
 
         // print empty line for readability
         printf("\n");
+
+        // Log wakeup reason for visibility
+        modemanager_log_wakeup_reason();
+
         // PM lock state dump after entering active phase
         ESP_LOGI(TAG, "PM lock state on entering active phase:");
         modemanager_dump_pm_locks();
@@ -309,9 +347,19 @@ void modemanager_exit_active_auto(void)
     printf("\n");
 }
 
-void modemanager_notify_activity_auto(void)
+void modemanager_notify_activity_auto_impl(const char *caller)
 {
-    // Call this on any node data or user action - same as manual version
+    // Only log the caller when this request actually wakes the system
+    // (i.e., we were not already active). This reduces spam from
+    // frequent activity notifications while already active.
+    if (!is_active)
+    {
+        if (caller && caller[0])
+        {
+            ESP_LOGI(TAG, "Activity notify requested by: %s", caller);
+        }
+    }
+    // Call into the auto-enter path (will noop if already active)
     modemanager_enter_active_auto();
 }
 

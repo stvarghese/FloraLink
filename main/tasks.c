@@ -385,7 +385,7 @@ static void init_task(void *pvParameters)
     esp_log_level_set("WiFiSetup", ESP_LOG_DEBUG);
     esp_log_level_set("ModeManager", ESP_LOG_DEBUG);
     esp_log_level_set("FloraLink", ESP_LOG_DEBUG);
-    esp_log_level_set("monitor", ESP_LOG_DEBUG);
+    // esp_log_level_set("monitor", ESP_LOG_DEBUG);
     blink_init();
 
     // Run onboard LED test pattern to verify functionality

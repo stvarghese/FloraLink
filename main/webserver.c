@@ -13,7 +13,13 @@
 #include "monitor.h"
 #include "nodeio.h"
 #include <esp_timer.h>
+#include "cJSON.h"
+#include "nodeio_lut.h"
+#include "nodeio_sensors.h"
+#include "nodeio_services.h"
 // #include <esp_heap_caps.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 extern const unsigned char webpage_main_css_start[] asm("_binary_main_css_start");
 extern const unsigned char webpage_main_css_end[] asm("_binary_main_css_end");
@@ -26,23 +32,44 @@ volatile int g_is_light_sleep = 0;
 // HTTP GET handler for /nodeslist
 static esp_err_t nodeslist_get_handler(httpd_req_t *req)
 {
-    // Any HTTP request signifies user activity; extend ACTIVE window
-    modemanager_notify_activity_auto();
+    /* Any HTTP request normally signifies user activity and extends the ACTIVE window.
+       To allow passive polling (for example by automated health checks) without
+       waking the system, a client may send the header `X-No-Extend: 1` to
+       suppress the automatic active-window notification. Default behaviour
+       remains unchanged (no header -> wake). */
+    char noextend_hdr[16] = {0};
+    if (httpd_req_get_hdr_value_str(req, "X-No-Extend", noextend_hdr, sizeof(noextend_hdr)) != ESP_OK || strcmp(noextend_hdr, "1") != 0)
+    {
+        modemanager_notify_activity_auto();
+    }
     HEAP_TRACE_START("NODESLIST");
 
-    char *json = (char *)malloc(2048);
+    // Allocate a larger buffer for nodeslist JSON; 4K should be enough for typical node counts
+    char *json = (char *)malloc(4096);
     if (!json)
     {
         httpd_resp_send_500(req);
         HEAP_TRACE_END_DEFAULT();
         return ESP_FAIL;
     }
-    nodeio_publish_nodeslist(json, 2048);
+    size_t len = nodeio_publish_nodeslist(json, 4096);
+    if (len == 0)
+    {
+        ESP_LOGW("WebServer", "nodeslist generation returned zero length");
+    }
+    // If the generated JSON filled the buffer, warn about possible truncation
+    if (len >= 4095)
+    {
+        ESP_LOGW("WebServer", "nodeslist JSON possibly truncated (len=%u, buf=4096)", (unsigned)len);
+    }
     // Explicitly instruct the client this connection will be closed
     httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send(req, json, len);
     free(json);
+
+    /* Runtime diagnostic: report current task stack high-water mark (words). */
+    ESP_LOGD("WebServer", "nodeslist handler stack high-water (words): %u", (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     HEAP_TRACE_END(100); // Higher threshold for HTTP response processing
     return ESP_OK;
@@ -351,6 +378,60 @@ static esp_err_t sleepstatus_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// HTTP GET handler for /luts - expose LUT metadata for dynamic UI
+static esp_err_t luts_get_handler(httpd_req_t *req)
+{
+    modemanager_notify_activity_auto();
+    HEAP_TRACE_START("LUTS_GET");
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON *sensors = cJSON_CreateArray();
+    cJSON *services = cJSON_CreateArray();
+
+    const field_lookup_t *s_lut = nodeio_get_sensors_lut();
+    size_t s_count = nodeio_get_sensors_lut_count();
+    for (size_t i = 0; i < s_count; ++i)
+    {
+        cJSON *it = cJSON_CreateObject();
+        cJSON_AddStringToObject(it, "name", s_lut[i].name);
+        cJSON_AddNumberToObject(it, "cap_mask", (double)(unsigned)s_lut[i].cap);
+        cJSON_AddNumberToObject(it, "loc", (int)s_lut[i].loc);
+        cJSON_AddNumberToObject(it, "elem_count", (int)s_lut[i].elem_count);
+        cJSON_AddItemToArray(sensors, it);
+    }
+
+    const field_lookup_t *sv_lut = nodeio_get_services_lut();
+    size_t sv_count = nodeio_get_services_lut_count();
+    for (size_t i = 0; i < sv_count; ++i)
+    {
+        cJSON *it = cJSON_CreateObject();
+        cJSON_AddStringToObject(it, "name", sv_lut[i].name);
+        cJSON_AddNumberToObject(it, "cap_mask", (double)(unsigned)sv_lut[i].cap);
+        cJSON_AddNumberToObject(it, "loc", (int)sv_lut[i].loc);
+        cJSON_AddNumberToObject(it, "elem_count", (int)sv_lut[i].elem_count);
+        cJSON_AddItemToArray(services, it);
+    }
+
+    cJSON_AddItemToObject(root, "sensors", sensors);
+    cJSON_AddItemToObject(root, "services", services);
+
+    char *out = cJSON_PrintUnformatted(root);
+    if (out)
+    {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, out, strlen(out));
+        cJSON_free(out);
+    }
+    else
+    {
+        httpd_resp_send_500(req);
+    }
+
+    cJSON_Delete(root);
+    HEAP_TRACE_END_DEFAULT();
+    return ESP_OK;
+}
+
 static const char *TAG = "WebServer";
 static uint32_t latest_distance = 0;
 static int32_t latest_error = 0;
@@ -384,8 +465,10 @@ esp_err_t webserver_init(void)
     // Define HTTP server configuration
     httpd_config_t config_http = HTTPD_DEFAULT_CONFIG();
     config_http.server_port = 80;
-    // increase number of uri hanlers
-    config_http.max_uri_handlers = 12;
+    // increase number of uri handlers.
+    // We register a number of HTML, API and static handlers and also the WebSocket
+    // handler later; allocate sufficient slots to avoid registration failure.
+    config_http.max_uri_handlers = 20;
 
     // Fix timeout issues - increase timeouts and enable keep-alive
     config_http.recv_wait_timeout = 60; // 60 seconds instead of 5
@@ -447,6 +530,11 @@ esp_err_t webserver_init(void)
         .method = HTTP_GET,
         .handler = sleepstatus_get_handler,
         .user_ctx = NULL};
+    httpd_uri_t luts_uri = {
+        .uri = "/luts",
+        .method = HTTP_GET,
+        .handler = luts_get_handler,
+        .user_ctx = NULL};
 
     // Static assets
     httpd_uri_t css_uri = {
@@ -479,6 +567,7 @@ esp_err_t webserver_init(void)
     httpd_register_uri_handler(server, &distance_uri);
     httpd_register_uri_handler(server, &configure_post_uri);
     httpd_register_uri_handler(server, &nodeslist_uri);
+    httpd_register_uri_handler(server, &luts_uri);
     httpd_register_uri_handler(server, &sleepstatus_uri);
     httpd_register_uri_handler(server, &subscribe_post_uri);
 

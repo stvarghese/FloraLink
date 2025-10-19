@@ -5,6 +5,10 @@
 
 // Define pong timeout in seconds
 #define WSS_PONG_TIMEOUT 10
+// Threshold (ms) above which pong response times are considered unusual and logged
+#ifndef WEBSOCK_PONG_WARN_MS
+#define WEBSOCK_PONG_WARN_MS 100
+#endif
 
 #define MISSING_SESSID -1
 
@@ -286,11 +290,19 @@ void websockserver_reset_pong_timer(int client_fd)
     // Record pong timestamp
     ws_pong_timestamps[session_id] = esp_timer_get_time();
 
-    // Calculate and log pong response time
+    // Calculate pong response time and only log if unusually high
     if (ws_ping_timestamps[session_id] > 0)
     {
         uint64_t latency_us = ws_pong_timestamps[session_id] - ws_ping_timestamps[session_id];
-        ESP_LOGI(TAG, "Pong response time for client_fd=%d: %llf ms", client_fd, latency_us / 1000.0);
+        double latency_ms = (double)latency_us / 1000.0;
+        if (latency_ms >= WEBSOCK_PONG_WARN_MS)
+        {
+            ESP_LOGW(TAG, "High pong response time for client_fd=%d: %.3f ms", client_fd, latency_ms);
+        }
+        else
+        {
+            ESP_LOGD(TAG, "Pong response time for client_fd=%d: %.3f ms", client_fd, latency_ms);
+        }
     }
 
     HEAP_TRACE_END_DEFAULT();

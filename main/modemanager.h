@@ -19,10 +19,15 @@ void modemanager_notify_activity(void); // Reset active window timer (call on no
 int modemanager_is_active(void);        // Returns 1 if in active window, 0 if low-power
 
 // Auto sleep mode (replaces manual sleep - keeps existing functions for fallback)
-esp_err_t modemanager_init_auto_light_sleep(void);    // Initialize auto light sleep configuration
-void modemanager_enter_active_auto(void);             // Enter active mode with auto sleep
-void modemanager_exit_active_auto(void);              // Enter idle mode with auto sleep
-void modemanager_notify_activity_auto(void);          // Reset active window timer (auto sleep version)
+esp_err_t modemanager_init_auto_light_sleep(void); // Initialize auto light sleep configuration
+void modemanager_enter_active_auto(void);          // Enter active mode with auto sleep
+void modemanager_exit_active_auto(void);           // Enter idle mode with auto sleep
+// Notify activity with optional caller information. Callers should use the
+// macro below which automatically fills a short caller string (function name).
+// The underlying implementation uses the suffix `_impl` and accepts a caller string.
+void modemanager_notify_activity_auto_impl(const char *caller); // Reset active window timer (auto sleep version)
+// Use the current function name as a short caller identifier
+#define modemanager_notify_activity_auto() modemanager_notify_activity_auto_impl(__func__)
 void modemanager_notify_wkup_activity_from_isr(void); // ISR-safe activity notification
 
 // For legacy/manual sleep (kept for comparison/fallback)

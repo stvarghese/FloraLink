@@ -233,6 +233,53 @@ button {
     flex-wrap: wrap;
 }
 
+.cap-groups.two-column {
+    display: flex;
+    gap: 12px;
+}
+
+.cap-column {
+    flex: 1 1 180px;
+}
+
+.cap-list.compact label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.98em;
+}
+
+.cap-unsupported {
+    color: #999;
+}
+
+.cap-unsupported input {
+    cursor: not-allowed;
+}
+
+.cfg-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-top: 8px;
+}
+
+.cfg-actions {
+    margin-top: 10px;
+    display: flex;
+    align-items: center;
+}
+
+.mask-val {
+    font-family: monospace;
+    background: #fff;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid #e8eef8;
+}
+
+
 .cap-group-title {
     font-weight: 600;
     margin-bottom: 4px;

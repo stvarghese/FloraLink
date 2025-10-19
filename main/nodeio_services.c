@@ -24,8 +24,8 @@ static const char *TAG = "nodeio_services";
 static const field_lookup_t services_unified_lut[] = {
     {"diagnostics", CAP_DIAG, FIELD_TYPE_STRUCT, FIELD_LOC_PERIODIC, offsetof(service_payload_t, diagnostics), 0},
     {"ota_status", CAP_OTA, FIELD_TYPE_STRUCT, FIELD_LOC_PERIODIC, offsetof(service_payload_t, ota_status), 0},
-    {"alert", CAP_ALERT, FIELD_TYPE_STRUCT, FIELD_LOC_SPORADIC, offsetof(sporadic_service_payload_t, data.alert), 0},
-    {"ota_event", CAP_OTA, FIELD_TYPE_STRUCT, FIELD_LOC_SPORADIC, offsetof(sporadic_service_payload_t, data.ota), 0},
+    // {"alert", CAP_ALERT, FIELD_TYPE_STRUCT, FIELD_LOC_SPORADIC, offsetof(sporadic_service_payload_t, data.alert), 0},
+    // {"ota_event", CAP_OTA, FIELD_TYPE_STRUCT, FIELD_LOC_SPORADIC, offsetof(sporadic_service_payload_t, data.ota), 0},
 };
 
 const field_lookup_t *nodeio_find_services_lut_field_by_name(const char *name)

@@ -389,7 +389,7 @@ static void init_task(void *pvParameters)
     blink_init();
 
     // Run onboard LED test pattern to verify functionality
-    onboardled_test_pattern();
+    // onboardled_test_pattern();
 
     // Show off RGB capabilities with a colorful dance
     // ESP_LOGD(TAG, "LED color dance starting...");

@@ -9,6 +9,32 @@
 #include "commonutils.h"
 #include <time.h>
 #include <stddef.h>
+#include <stdarg.h>
+
+// Safe JSON append helper: appends formatted text into json buffer at offset with size json_size.
+// Returns number of bytes appended on success, or -1 on truncation/error.
+static int json_append(char *json, size_t json_size, int *offset, const char *fmt, ...)
+{
+    if (!json || !offset || *offset < 0 || json_size == 0)
+        return -1;
+    int rem = (int)(json_size - *offset);
+    if (rem <= 0)
+        return -1;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(json + *offset, rem, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return -1;
+    if (n >= rem)
+    {
+        /* indicate truncation */
+        *offset += rem - 1;
+        return -1;
+    }
+    *offset += n;
+    return n;
+}
 
 // Maximum num of nodes shall be equal to the maximum number of sessions
 #define MAX_NODES MAX_SESSIONS
@@ -462,6 +488,16 @@ static inline esp_err_t nodeio_parse_sporadic_event(protocol_msg_t *p_msg, cJSON
             if (nodeio_set_sensor_lut_field(p_msg, 0, "doorsense", (size_t)i, &val) != NIO_OK)
             {
                 ESP_LOGW(TAG, "Failed to set sporadic doorsense_%d", i);
+            }
+            else
+            {
+                /* Log the received doorsense value immediately for visibility */
+                const char *sval = "UNKNOWN";
+                if (val == 1)
+                    sval = "OPEN";
+                else if (val == 0)
+                    sval = "CLOSED";
+                ESP_LOGI(TAG, "Node %d event: doorsense_%d = %s", p_msg->node_id, i, sval);
             }
         }
         return ESP_OK;
@@ -1173,75 +1209,122 @@ void nodeio_monitor_nodeslist(void)
     {
         if (node_contexts[i].p_node != NULL && node_contexts[i].p_node->current_state == NODEIO_STATE_CONNECTED && node_contexts[i].p_session->connected)
         {
-            // Iterate through payload
-            for (int j = 0; j < node_contexts[i].p_msg->payload.payload_count; j++)
+            // Cache p_msg locally and iterate through payload only if present
+            protocol_msg_t *pmsg = node_contexts[i].p_msg;
+            if (pmsg)
             {
-                // Print all sensor values in a concise, tabular way using the sensors LUT
+                for (int j = 0; j < pmsg->payload.payload_count; j++)
                 {
-                    const field_lookup_t *s_lut = nodeio_get_sensors_lut();
-                    size_t s_count = nodeio_get_sensors_lut_count();
-                    for (size_t s = 0; s < s_count; ++s)
+                    // Print all periodic sensor values in a concise, tabular way using the sensors LUT
                     {
-                        float fv = 0.0f;
-                        if (nodeio_get_sensor_lut_field(node_contexts[i].p_msg, j, s_lut[s].name, 0, &fv, sizeof(fv)) == NIO_OK)
+                        const field_lookup_t *s_lut = nodeio_get_sensors_lut();
+                        size_t s_count = nodeio_get_sensors_lut_count();
+                        for (size_t s = 0; s < s_count; ++s)
                         {
-                            (void)fv; // silence when logging disabled
-                            // ESP_LOGI(TAG, "Node %d sensor payload: %s: %.2f", i, s_lut[s].name, fv);
+                            float fv = 0.0f;
+                            if (nodeio_get_sensor_lut_field(node_contexts[i].p_msg, j, s_lut[s].name, 0, &fv, sizeof(fv)) == NIO_OK)
+                            {
+                                // ESP_LOGI(TAG, "Node %d sensor payload: %s: %.2f", i, s_lut[s].name, fv);
+                            }
+                        }
+                    }
+
+                    // (sporadic doorsense logging moved out of the per-payload loop)
+
+                    // Print each service diag or ota value if present (serialize via service helper)
+                    char serbuf[128];
+                    if (nodeio_serialize_service_lut(node_contexts[i].p_msg, j, "diagnostics", serbuf, sizeof(serbuf)) == NIO_S_OK)
+                    {
+                        // ESP_LOGI(TAG, "Node %d service payload: Diag: %s", i, serbuf);
+                    }
+                    if (nodeio_serialize_service_lut(node_contexts[i].p_msg, j, "ota_status", serbuf, sizeof(serbuf)) == NIO_S_OK)
+                    {
+                        // ESP_LOGI(TAG, "Node %d service payload: OTA: %s", i, serbuf);
+                    }
+                }
+                // After iterating periodic payloads, also print sporadic doorsense entries (if present)
+                if (pmsg)
+                {
+                    const field_lookup_t *fld = nodeio_find_sensors_lut_field_by_name("doorsense");
+                    if (fld && (pmsg->payload.sporadic_data.current_cap_mask & fld->cap))
+                    {
+                        for (size_t di = 0; di < fld->elem_count; ++di)
+                        {
+                            uint8_t v = 0xFF;
+                            if (nodeio_get_sensor_lut_field(pmsg, 0, "doorsense", di, &v, sizeof(v)) == NIO_OK)
+                            {
+                                const char *sval = "UNKNOWN";
+                                if (v == 1)
+                                    sval = "OPEN";
+                                else if (v == 0)
+                                    sval = "CLOSED";
+                                ESP_LOGI(TAG, "Node %d sporadic: doorsense_%u = %s", i, (unsigned)di, sval);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        /* also accept legacy 'door_state' if present in sporadic current_cap_mask via aliasing */
+                        const field_lookup_t *legacy = nodeio_find_sensors_lut_field_by_name("door_state");
+                        if (legacy && (pmsg->payload.sporadic_data.current_cap_mask & legacy->cap))
+                        {
+                            for (size_t di = 0; di < legacy->elem_count; ++di)
+                            {
+                                uint8_t v = 0xFF;
+                                if (nodeio_get_sensor_lut_field(pmsg, 0, "door_state", di, &v, sizeof(v)) == NIO_OK)
+                                {
+                                    const char *sval = "UNKNOWN";
+                                    if (v == 1)
+                                        sval = "OPEN";
+                                    else if (v == 0)
+                                        sval = "CLOSED";
+                                    ESP_LOGI(TAG, "Node %d sporadic: door_state_%u = %s", i, (unsigned)di, sval);
+                                }
+                            }
                         }
                     }
                 }
+                // Log if node is online
+                // ESP_LOGI(TAG, "Node %d is online", i);
+                // Update and log node uptime
+                if (node_contexts[i].node_uptime_start != 0)
+                {
+                    node_contexts[i].node_uptime = (esp_timer_get_time() / 1000000) - node_contexts[i].node_uptime_start; // in seconds
+                    int64_t uptime = node_contexts[i].node_uptime;
+                    int dd, hh, mm, ss;
+                    dd = (int)(uptime / 86400);
+                    hh = (int)((uptime / 3600) % 24);
+                    mm = (int)((uptime / 60) % 60);
+                    ss = (int)(uptime % 60);
+                    char uptime_str[32];
+                    if (dd > 0)
+                        snprintf(uptime_str, sizeof(uptime_str), "%d:%02d:%02d:%02d", dd, hh, mm, ss);
+                    else if (hh > 0)
+                        snprintf(uptime_str, sizeof(uptime_str), "%02d:%02d:%02d", hh, mm, ss);
+                    else if (mm > 0)
+                        snprintf(uptime_str, sizeof(uptime_str), "%02d:%02d", mm, ss);
+                    else
+                        snprintf(uptime_str, sizeof(uptime_str), "%02d", ss);
 
-                // Print each service diag or ota value if present (serialize via service helper)
-                char serbuf[128];
-                if (nodeio_serialize_service_lut(node_contexts[i].p_msg, j, "diagnostics", serbuf, sizeof(serbuf)) == NIO_S_OK)
-                {
-                    // ESP_LOGI(TAG, "Node %d service payload: Diag: %s", i, serbuf);
+                    /* Throttle uptime logging to at most once per 60 seconds per node */
+                    int64_t now_s = esp_timer_get_time() / 1000000;
+                    if (node_contexts[i].last_uptime_log_ts == 0 || (now_s - node_contexts[i].last_uptime_log_ts) >= 60)
+                    {
+                        ESP_LOGI(TAG, "Node %d uptime: %s", i, uptime_str);
+                        node_contexts[i].last_uptime_log_ts = now_s;
+                    }
                 }
-                if (nodeio_serialize_service_lut(node_contexts[i].p_msg, j, "ota_status", serbuf, sizeof(serbuf)) == NIO_S_OK)
-                {
-                    // ESP_LOGI(TAG, "Node %d service payload: OTA: %s", i, serbuf);
-                }
-            }
-            // Log if node is online
-            // ESP_LOGI(TAG, "Node %d is online", i);
-            // Update and log node uptime
-            if (node_contexts[i].node_uptime_start != 0)
-            {
-                node_contexts[i].node_uptime = (esp_timer_get_time() / 1000000) - node_contexts[i].node_uptime_start; // in seconds
-                int64_t uptime = node_contexts[i].node_uptime;
-                int dd, hh, mm, ss;
-                dd = (int)(uptime / 86400);
-                hh = (int)((uptime / 3600) % 24);
-                mm = (int)((uptime / 60) % 60);
-                ss = (int)(uptime % 60);
-                char uptime_str[32];
-                if (dd > 0)
-                    snprintf(uptime_str, sizeof(uptime_str), "%d:%02d:%02d:%02d", dd, hh, mm, ss);
-                else if (hh > 0)
-                    snprintf(uptime_str, sizeof(uptime_str), "%02d:%02d:%02d", hh, mm, ss);
-                else if (mm > 0)
-                    snprintf(uptime_str, sizeof(uptime_str), "%02d:%02d", mm, ss);
                 else
-                    snprintf(uptime_str, sizeof(uptime_str), "%02d", ss);
-
-                /* Throttle uptime logging to at most once per 60 seconds per node */
-                int64_t now_s = esp_timer_get_time() / 1000000;
-                if (node_contexts[i].last_uptime_log_ts == 0 || (now_s - node_contexts[i].last_uptime_log_ts) >= 60)
                 {
-                    ESP_LOGI(TAG, "Node %d uptime: %s", i, uptime_str);
-                    node_contexts[i].last_uptime_log_ts = now_s;
+                    ESP_LOGD(TAG, "Node %d uptime: not started", i);
                 }
-            }
-            else
-            {
-                ESP_LOGD(TAG, "Node %d uptime: not started", i);
             }
         }
+
+        // ESP_LOGI(TAG, "-----------------------------------");
+
+        HEAP_TRACE_END_DEFAULT();
     }
-
-    // ESP_LOGI(TAG, "-----------------------------------");
-
-    HEAP_TRACE_END_DEFAULT();
 }
 
 size_t nodeio_publish_nodeslist(char *json, size_t json_size)
@@ -1264,6 +1347,8 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
     for (int i = 0; i < MAX_NODES; i++)
     {
         node_context_t *ctx = &node_contexts[i];
+        /* Snapshot the message pointer to avoid races while formatting JSON */
+        protocol_msg_t *pmsg = ctx->p_msg;
 
         // ESP_LOGD(TAG, "Node context %d: p_node=%p, p_session=%p, p_msg=%p",
         //          i, (void *)ctx->p_node, (void *)ctx->p_session, (void *)ctx->p_msg);
@@ -1274,11 +1359,8 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
             node_count++;
             if (!first_node)
             {
-                int rem = (int)(json_size - offset);
-                if (rem > 0)
-                    offset += snprintf(json + offset, rem, ",");
-                else
-                    break; // no space left
+                if (json_append(json, json_size, &offset, ",") < 0)
+                    break; // no space left or truncation
             }
             first_node = 0;
 
@@ -1291,24 +1373,12 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
 
             // include capability mask and current subscription state for UI configuration
             {
-                int rem = (int)(json_size - offset);
-                if (rem <= 0)
+                if (json_append(json, json_size, &offset, "{\"id\":%d,\"status\":\"%s\",\"uptime_s\":%d,\"cap_mask\":%u,\"sub\":{\"mask\":%u,\"interval_ms\":%u},",
+                                ctx->p_node->node_id, status, uptime_s,
+                                (unsigned)ctx->p_node->capability_mask,
+                                (unsigned)ctx->subscription.subscribe_mask,
+                                (unsigned)ctx->subscription.interval_ms) < 0)
                     break;
-                int n = snprintf(json + offset, rem,
-                                 "{\"id\":%d,\"status\":\"%s\",\"uptime_s\":%d,\"cap_mask\":%u,\"sub\":{\"mask\":%u,\"interval_ms\":%u},",
-                                 ctx->p_node->node_id, status, uptime_s,
-                                 (unsigned)ctx->p_node->capability_mask,
-                                 (unsigned)ctx->subscription.subscribe_mask,
-                                 (unsigned)ctx->subscription.interval_ms);
-                if (n < 0)
-                    break;
-                if (n >= rem)
-                {
-                    /* Truncated - avoid buffer overflow */
-                    offset += rem - 1;
-                    break;
-                }
-                offset += n;
             }
 
             // Sensors: output all available from sensors LUT
@@ -1328,56 +1398,34 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
                     }
                     first_sensor = 0;
                     float fv = 0.0f;
-                    if (ctx->p_msg && ctx->p_msg->payload.payload_count > 0 &&
-                        nodeio_get_sensor_lut_field(ctx->p_msg, 0, s_lut[s].name, 0, &fv, sizeof(fv)) == NIO_OK)
+                    if (pmsg && pmsg->payload.payload_count > 0 &&
+                        nodeio_get_sensor_lut_field(pmsg, 0, s_lut[s].name, 0, &fv, sizeof(fv)) == NIO_OK)
                     {
-                        {
-                            int rem = (int)(json_size - offset);
-                            if (rem <= 0)
-                                break;
-                            int n = snprintf(json + offset, rem, "\"%s\":%.2f", s_lut[s].name, fv);
-                            if (n < 0)
-                                break;
-                            if (n >= rem)
-                            {
-                                offset += rem - 1;
-                                break;
-                            }
-                            offset += n;
-                        }
+                        if (json_append(json, json_size, &offset, "\"%s\":%.2f", s_lut[s].name, fv) < 0)
+                            break;
                     }
                     else
                     {
-                        int rem = (int)(json_size - offset);
-                        if (rem <= 0)
+                        if (json_append(json, json_size, &offset, "\"%s\":null", s_lut[s].name) < 0)
                             break;
-                        int n = snprintf(json + offset, rem, "\"%s\":null", s_lut[s].name);
-                        if (n < 0)
-                            break;
-                        if (n >= rem)
-                        {
-                            offset += rem - 1;
-                            break;
-                        }
-                        offset += n;
                     }
                 }
             }
 
             // Services: output all available from services LUT
             {
-                int rem = (int)(json_size - offset);
-                if (rem <= 0)
-                    break;
-                int n = snprintf(json + offset, rem, ",\"services\":{");
-                if (n < 0)
-                    break;
-                if (n >= rem)
+                /* If no sensors were emitted, the header already contains a
+                   trailing comma; avoid emitting an extra comma in that case. */
+                if (first_sensor == 1)
                 {
-                    offset += rem - 1;
-                    break;
+                    if (json_append(json, json_size, &offset, "\"services\":{") < 0)
+                        break;
                 }
-                offset += n;
+                else
+                {
+                    if (json_append(json, json_size, &offset, ",\"services\":{") < 0)
+                        break;
+                }
             }
             int first_service = 1;
             {
@@ -1388,8 +1436,8 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
                     char serbuf[256];
                     bool have_service_output = false;
 
-                    if (ctx->p_msg && ctx->p_msg->payload.payload_count > 0 &&
-                        nodeio_serialize_service_lut(ctx->p_msg, 0, sv_lut[s].name, serbuf, sizeof(serbuf)) == NIO_S_OK)
+                    if (pmsg && pmsg->payload.payload_count > 0 &&
+                        nodeio_serialize_service_lut(pmsg, 0, sv_lut[s].name, serbuf, sizeof(serbuf)) == NIO_S_OK)
                     {
                         // We have serializable service data
                         have_service_output = true;
@@ -1404,10 +1452,7 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
                     // Emit comma separator only if this is not the first emitted service entry
                     if (!first_service)
                     {
-                        int rem = (int)(json_size - offset);
-                        if (rem > 0)
-                            offset += snprintf(json + offset, rem, ",");
-                        else
+                        if (json_append(json, json_size, &offset, ",") < 0)
                             break;
                     }
 
@@ -1421,60 +1466,90 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
                         int errval = 0;
                         if (p)
                             (void)sscanf(p, "\"error_code\":%d", &errval);
-                        int rem = (int)(json_size - offset);
-                        if (rem <= 0)
+                        if (json_append(json, json_size, &offset, "\"%s\":%d", sv_lut[s].name, errval) < 0)
                             break;
-                        int n = snprintf(json + offset, rem, "\"%s\":%d", sv_lut[s].name, errval);
-                        if (n < 0)
-                            break;
-                        if (n >= rem)
-                        {
-                            offset += rem - 1;
-                            break;
-                        }
-                        offset += n;
                     }
                     else if (strcmp(sv_lut[s].name, "ota") == 0 || strcmp(sv_lut[s].name, "ota_status") == 0)
                     {
                         /* include service payload as raw JSON (avoid embedding JSON as a quoted string)
                            nodeio_serialize_service_lut() returns a JSON fragment; insert it directly. */
-                        int rem = (int)(json_size - offset);
-                        if (rem <= 0)
+                        if (json_append(json, json_size, &offset, "\"%s\":%s", sv_lut[s].name, serbuf) < 0)
                             break;
-                        int n = snprintf(json + offset, rem, "\"%s\":%s", sv_lut[s].name, serbuf);
-                        if (n < 0)
-                            break;
-                        if (n >= rem)
-                        {
-                            offset += rem - 1;
-                            break;
-                        }
-                        offset += n;
                     }
                     else
                     {
-                        int rem = (int)(json_size - offset);
-                        if (rem <= 0)
+                        if (json_append(json, json_size, &offset, "\"%s\":true", sv_lut[s].name) < 0)
                             break;
-                        int n = snprintf(json + offset, rem, "\"%s\":true", sv_lut[s].name);
-                        if (n < 0)
-                            break;
-                        if (n >= rem)
-                        {
-                            offset += rem - 1;
-                            break;
-                        }
-                        offset += n;
                     }
                 }
             }
+
+            /* Close the services object (even if empty) so JSON remains valid. */
+            if (json_append(json, json_size, &offset, "}") < 0)
+                break;
+
+            /* Sporadic/event-driven sensors (e.g. doorsense) - include under "sporadic" */
             {
-                int rem = (int)(json_size - offset);
-                if (rem > 0)
-                    offset += snprintf(json + offset, rem, "}}");
+                if (json_append(json, json_size, &offset, ",\"sporadic\":{") < 0)
+                    break;
+
+                /* doorsense canonical field */
+                const field_lookup_t *ds_fld = nodeio_find_sensors_lut_field_by_name("doorsense");
+                if (pmsg && ds_fld && (pmsg->payload.sporadic_data.current_cap_mask & ds_fld->cap))
+                {
+                    /* Emit numeric array of door states (0/1/255 for unknown) */
+                    if (json_append(json, json_size, &offset, "\"doorsense\":[") < 0)
+                        break;
+
+                    for (size_t di = 0; di < ds_fld->elem_count; ++di)
+                    {
+                        uint8_t v = 0xFF;
+                        (void)nodeio_get_sensor_lut_field(pmsg, 0, "doorsense", di, &v, sizeof(v));
+                        /* Emit as string value */
+                        const char *sval = "UNKNOWN";
+                        if (v == 1)
+                            sval = "OPEN";
+                        else if (v == 0)
+                            sval = "CLOSED";
+                        if (json_append(json, json_size, &offset, "%s\"%s\"", (di == 0) ? "" : "", sval) < 0)
+                            break;
+                        /* append comma between elements except last */
+                        if (di + 1 < ds_fld->elem_count)
+                        {
+                            if (json_append(json, json_size, &offset, ",") < 0)
+                                break;
+                        }
+                    }
+
+                    /* close array */
+                    int rem4 = (int)(json_size - offset);
+                    if (rem4 <= 0)
+                        break;
+                    int ne = snprintf(json + offset, rem4, "]");
+                    if (ne < 0)
+                        break;
+                    if (ne >= rem4)
+                    {
+                        offset += rem4 - 1;
+                        break;
+                    }
+                    offset += ne;
+                }
                 else
+                {
+                    /* no doorsense present - emit null to keep JSON shape predictable */
+                    if (json_append(json, json_size, &offset, "\"doorsense\":null") < 0)
+                        break;
+                }
+
+                /* close sporadic object */
+                if (json_append(json, json_size, &offset, "}") < 0)
                     break;
             }
+
+            /* Close node object */
+            if (json_append(json, json_size, &offset, "}") < 0)
+                break;
         }
     }
 

@@ -591,7 +591,45 @@ class NodeManager:
             if message:
                 payload["message"] = message
             if fields and isinstance(fields, dict):
-                payload.update(fields)
+                # Normalize doorsense array -> per-index keys expected by the hub
+                # Hub expects keys like 'doorsense_0', 'doorsense_1', ... (or legacy 'door_state_N').
+                fs = dict(fields)  # make a shallow copy so we can mutate
+                if 'doorsense' in fs and isinstance(fs['doorsense'], (list, tuple)):
+                    arr = fs.pop('doorsense')
+                    for i, v in enumerate(arr):
+                        sval = None
+                        if isinstance(v, str):
+                            sval = v.upper()
+                            if sval not in ("OPEN", "CLOSED"):
+                                # try simple heuristics
+                                if sval.startswith('O'):
+                                    sval = "OPEN"
+                                elif sval.startswith('C'):
+                                    sval = "CLOSED"
+                                else:
+                                    sval = "UNKNOWN"
+                        elif isinstance(v, (int, float)):
+                            sval = "OPEN" if int(v) == 1 else "CLOSED" if int(v) == 0 else "UNKNOWN"
+                        elif isinstance(v, bool):
+                            sval = "OPEN" if v else "CLOSED"
+                        else:
+                            sval = "UNKNOWN"
+                        fs[f"doorsense_{i}"] = sval
+                # also accept legacy 'door_state' array
+                if 'door_state' in fs and isinstance(fs['door_state'], (list, tuple)):
+                    arr = fs.pop('door_state')
+                    for i, v in enumerate(arr):
+                        sval = None
+                        if isinstance(v, str):
+                            sval = v.upper()
+                        elif isinstance(v, (int, float)):
+                            sval = "OPEN" if int(v) == 1 else "CLOSED" if int(v) == 0 else "UNKNOWN"
+                        elif isinstance(v, bool):
+                            sval = "OPEN" if v else "CLOSED"
+                        else:
+                            sval = "UNKNOWN"
+                        fs[f"door_state_{i}"] = sval
+                payload.update(fs)
             await event_queue.put(payload)
             print(f"Enqueued event for node {node_id}: {event_type}")
 

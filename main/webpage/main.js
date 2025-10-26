@@ -124,16 +124,18 @@ async function fetchNodes() {
                     presentIds.add(node.id);
                     const nt = window.nodeTimes[node.id] || {};
                     if (!nt.firstSeen) nt.firstSeen = nowTs;
+                    // Mark lastOnline on every fetch
                     nt.lastOnline = nowTs;
+                    // Treat presence in the nodeslist as fresh activity: update lastDataTs
+                    // so nodes that only connect (without immediate telemetry) don't flicker offline.
+                    nt.lastDataTs = nowTs;
+                    // Preserve lastUptime when telemetry changes
                     if (typeof node.uptime_s === 'number') {
                         if (nt.lastUptime !== node.uptime_s) {
                             nt.lastUptime = node.uptime_s;
-                            nt.lastDataTs = nowTs;
-                            if (nt.offlineSince) delete nt.offlineSince;
-                        } else if (!nt.lastDataTs) {
-                            nt.lastDataTs = nowTs;
                         }
                     }
+                    // Clear any offlineSince marker since the node is present now
                     if (nt.offlineSince) delete nt.offlineSince;
                     window.nodeTimes[node.id] = nt;
                     window.knownNodes[node.id] = { ...node };
@@ -222,6 +224,59 @@ async function fetchNodes() {
                     html += ` <span class=\"sensor\">${moistIcon}<span>${node.moisture != null ? node.moisture : '-'}</span></span>`;
                     html += `</div>`;
                     html += `<div class='node-uptime'>Uptime: ${uptime}</div>`;
+
+                    // --- Event / sporadic rows (doors, alerts, etc.) ---
+                    try {
+                        const sporadic = node.sporadic || {};
+                        // Flatten sporadic entries: support value forms like
+                        // { doorsense: ["UNKNOWN","OPEN"] } or { doorsense_0: "OPEN" }
+                        const flat = {};
+                        Object.keys(sporadic).forEach(k => {
+                            const v = sporadic[k];
+                            if (v === null || typeof v === 'undefined') return;
+                            if (Array.isArray(v)) {
+                                for (let i = 0; i < v.length; ++i) {
+                                    if (v[i] === null || typeof v[i] === 'undefined') continue;
+                                    flat[`${k}_${i}`] = v[i];
+                                }
+                            } else if (typeof v === 'object') {
+                                // If it's an object, flatten its properties as k_subkey
+                                Object.keys(v).forEach(sub => {
+                                    const sv = v[sub];
+                                    if (sv === null || typeof sv === 'undefined') return;
+                                    flat[`${k}_${sub}`] = sv;
+                                });
+                            } else {
+                                flat[k] = v;
+                            }
+                        });
+
+                        const sKeys = Object.keys(flat);
+                        if (sKeys.length > 0) {
+                            // Group keys by prefix (e.g., 'doorsense_0' -> 'doorsense')
+                            const grouped = {};
+                            sKeys.forEach(k => {
+                                const cat = k.indexOf('_') > 0 ? k.split('_')[0] : k;
+                                if (!grouped[cat]) grouped[cat] = [];
+                                grouped[cat].push(k);
+                            });
+
+                            const formatEventValue = (v) => {
+                                if (typeof v === 'number') return (v === 1) ? 'OPEN' : (v === 0 ? 'CLOSED' : String(v));
+                                if (typeof v === 'boolean') return v ? 'OPEN' : 'CLOSED';
+                                if (typeof v === 'string') return v.toUpperCase();
+                                return String(v);
+                            };
+
+                            // Render each category as its own row
+                            Object.keys(grouped).forEach(cat => {
+                                const keys = grouped[cat];
+                                const title = (cat === 'doorsense') ? 'Doors' : lutNameToLabel(cat);
+                                const parts = keys.map(k => `${k} = ${formatEventValue(flat[k])}`);
+                                html += `<div class='event-row event-${cat}'>${title}: ${parts.join(', ')}</div>`;
+                            });
+                        }
+                    } catch (e) { /* ignore render errors */ }
                 } else {
                     html += `<div class='node-status offline'>Offline</div>`;
                     html += `<div class='node-lastseen'>Last seen: <span style='color:#d32f2f'>${lastSeen}</span></div>`;

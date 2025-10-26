@@ -44,7 +44,8 @@ static const char *TAG = "nodeio";
 typedef struct
 {
     node_params_t *p_node;
-    protocol_msg_t *p_msg;
+    protocol_msg_t *p_msg_data;  // Latest periodic/data message
+    protocol_msg_t *p_msg_event; // Latest sporadic/event message
     wss_session_t *p_session;
     subscribe_config_t subscription; // Add this line
     bool subscribed;                 // Track if a subscription is active
@@ -445,42 +446,95 @@ static inline esp_err_t nodeio_parse_sporadic_event(protocol_msg_t *p_msg, cJSON
             return ESP_FAIL;
         }
 
-        /* Count present doorsense_N or legacy door_state_N keys and clamp to declared elem_count */
+        /* Support two canonical shapes:
+           1) Canonical array form: { "doorsense": ["OPEN","CLOSED", ...] }
+           2) Legacy per-index keys: { "doorsense_0": "OPEN", "doorsense_1": "CLOSED", ... }
+           Prefer the canonical array when present; otherwise fall back to per-index keys.
+        */
+
         int field_count = 0;
-        cJSON *current_item = msg_payload->child;
-        while (current_item)
+        cJSON *doorsense_arr = cJSON_GetObjectItem(msg_payload, "doorsense");
+        cJSON *door_state_arr = NULL;
+        bool using_array = false;
+
+        if (doorsense_arr && cJSON_IsArray(doorsense_arr))
         {
-            if (current_item->string && (strncmp(current_item->string, "doorsense_", 10) == 0 || strncmp(current_item->string, "door_state_", 11) == 0))
-                field_count++;
-            current_item = current_item->next;
+            field_count = cJSON_GetArraySize(doorsense_arr);
+            using_array = true;
         }
+        else
+        {
+            /* accept legacy alias 'door_state' as array form too */
+            door_state_arr = cJSON_GetObjectItem(msg_payload, "door_state");
+            if (door_state_arr && cJSON_IsArray(door_state_arr))
+            {
+                field_count = cJSON_GetArraySize(door_state_arr);
+                doorsense_arr = door_state_arr; /* reuse pointer */
+                using_array = true;
+            }
+            else
+            {
+                /* Count per-index keys if no array is present */
+                cJSON *current_item = msg_payload->child;
+                while (current_item)
+                {
+                    if (current_item->string && (strncmp(current_item->string, "doorsense_", 10) == 0 || strncmp(current_item->string, "door_state_", 11) == 0))
+                        field_count++;
+                    current_item = current_item->next;
+                }
+            }
+        }
+
         if (field_count > (int)fld->elem_count)
             field_count = (int)fld->elem_count;
 
         for (int i = 0; i < field_count; ++i)
         {
-            /* allocate a slightly larger buffer to satisfy static analyzers for
-               large integer values (although elem_count will usually be small) */
-            char key[32];
-            /* Prefer canonical key 'doorsense_N', but accept legacy 'door_state_N' if present */
-            char key_alt[32];
-            snprintf(key, sizeof(key), "doorsense_%d", i);
-            cJSON *door_state_item = cJSON_GetObjectItem(msg_payload, key);
-            if (!door_state_item)
-            {
-                snprintf(key_alt, sizeof(key_alt), "door_state_%d", i);
-                door_state_item = cJSON_GetObjectItem(msg_payload, key_alt);
-            }
             uint8_t val = 0xFF; // unknown
-            if (door_state_item)
+
+            if (using_array && doorsense_arr)
             {
-                if (cJSON_IsString(door_state_item))
+                cJSON *itm = cJSON_GetArrayItem(doorsense_arr, i);
+                if (itm)
                 {
-                    val = (strcmp(door_state_item->valuestring, "OPEN") == 0) ? 1 : 0;
+                    if (cJSON_IsString(itm))
+                    {
+                        if (strcmp(itm->valuestring, "OPEN") == 0)
+                            val = 1;
+                        else if (strcmp(itm->valuestring, "CLOSED") == 0)
+                            val = 0;
+                    }
+                    else if (cJSON_IsNumber(itm))
+                    {
+                        val = (uint8_t)itm->valueint;
+                    }
                 }
-                else if (cJSON_IsNumber(door_state_item))
+            }
+            else
+            {
+                /* per-index key lookup */
+                char key[32];
+                char key_alt[32];
+                snprintf(key, sizeof(key), "doorsense_%d", i);
+                cJSON *door_state_item = cJSON_GetObjectItem(msg_payload, key);
+                if (!door_state_item)
                 {
-                    val = (uint8_t)door_state_item->valueint;
+                    snprintf(key_alt, sizeof(key_alt), "door_state_%d", i);
+                    door_state_item = cJSON_GetObjectItem(msg_payload, key_alt);
+                }
+                if (door_state_item)
+                {
+                    if (cJSON_IsString(door_state_item))
+                    {
+                        if (strcmp(door_state_item->valuestring, "OPEN") == 0)
+                            val = 1;
+                        else if (strcmp(door_state_item->valuestring, "CLOSED") == 0)
+                            val = 0;
+                    }
+                    else if (cJSON_IsNumber(door_state_item))
+                    {
+                        val = (uint8_t)door_state_item->valueint;
+                    }
                 }
             }
 
@@ -598,31 +652,12 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
     wss_session_t **const pp_session = &node_contexts[node_id].p_session;
 
     // Free any existing message for this node before allocating new one
-    if (node_contexts[node_id].p_msg != NULL)
-    {
-        free(node_contexts[node_id].p_msg);
-        node_contexts[node_id].p_msg = NULL;
-    }
+    /* Do not free other message slot here; we'll assign the new message to the
+       appropriate per-type slot after successful parsing to avoid premature
+       freeing. */
 
-    // Allocate a new protocol_msg_t for this message
-    protocol_msg_t *p_currentmsg = calloc(1, sizeof(protocol_msg_t));
-    if (!p_currentmsg)
-    {
-        nodeio_handle_error(client_fd, "Failed to allocate memory");
-        cJSON_Delete(root);
-        return;
-    }
-
-    node_contexts[node_id].p_msg = p_currentmsg;
-    p_currentmsg->magic = magic_item->valueint;
-    p_currentmsg->node_id = node_id;
-    p_currentmsg->seq_num = seq_num;
-    p_currentmsg->timestamp = timestamp;
-
-    // Convert type_str to enum msg_type_t
+    // Convert type_str to enum msg_type_t and validate before allocating message buffer
     msg_type_t msg_type = nodeio_type_str_to_enum(type_str);
-    p_currentmsg->type = msg_type;
-
     ESP_LOGI(TAG, "Message type: %s, 0x%02X", type_str, msg_type);
     // Check if the message type is valid
     if (msg_type == MSG_UNKNOWN)
@@ -689,13 +724,35 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
         }
         if ((*pp_session)->client_fd == client_fd && (*pp_node)->current_state == NODEIO_STATE_CONNECTED)
         {
-            // Parse message payload
-            if (nodeio_parse_message_payload(root, (*pp_node)->capability_mask, p_currentmsg) != ESP_OK)
+            // Allocate a new protocol_msg_t for this message (transient) and populate envelope
+            protocol_msg_t *p_currentmsg = calloc(1, sizeof(protocol_msg_t));
+            if (!p_currentmsg)
             {
-                nodeio_handle_error(client_fd, "Failed to parse message payload");
+                nodeio_handle_error(client_fd, "Failed to allocate memory");
                 cJSON_Delete(root);
                 return;
             }
+            p_currentmsg->magic = magic_item->valueint;
+            p_currentmsg->node_id = node_id;
+            p_currentmsg->seq_num = seq_num;
+            p_currentmsg->timestamp = timestamp;
+            p_currentmsg->type = msg_type;
+
+            // Parse message payload into the transient p_currentmsg
+            if (nodeio_parse_message_payload(root, (*pp_node)->capability_mask, p_currentmsg) != ESP_OK)
+            {
+                nodeio_handle_error(client_fd, "Failed to parse message payload");
+                free(p_currentmsg);
+                cJSON_Delete(root);
+                return;
+            }
+            // Parsing succeeded: store into the periodic slot, replacing any previous
+            if (node_contexts[node_id].p_msg_data)
+            {
+                free(node_contexts[node_id].p_msg_data);
+                node_contexts[node_id].p_msg_data = NULL;
+            }
+            node_contexts[node_id].p_msg_data = p_currentmsg;
         }
     }
 
@@ -710,13 +767,35 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
         }
         if ((*pp_session)->client_fd == client_fd && (*pp_node)->current_state == NODEIO_STATE_CONNECTED)
         {
-            // Parse message payload
-            if (nodeio_parse_message_payload(root, (*pp_node)->capability_mask, p_currentmsg) != ESP_OK)
+            // Allocate transient message for event and populate envelope
+            protocol_msg_t *p_currentmsg = calloc(1, sizeof(protocol_msg_t));
+            if (!p_currentmsg)
             {
-                nodeio_handle_error(client_fd, "Failed to parse message payload");
+                nodeio_handle_error(client_fd, "Failed to allocate memory");
                 cJSON_Delete(root);
                 return;
             }
+            p_currentmsg->magic = magic_item->valueint;
+            p_currentmsg->node_id = node_id;
+            p_currentmsg->seq_num = seq_num;
+            p_currentmsg->timestamp = timestamp;
+            p_currentmsg->type = msg_type;
+
+            // Parse message payload into transient p_currentmsg
+            if (nodeio_parse_message_payload(root, (*pp_node)->capability_mask, p_currentmsg) != ESP_OK)
+            {
+                nodeio_handle_error(client_fd, "Failed to parse message payload");
+                free(p_currentmsg);
+                cJSON_Delete(root);
+                return;
+            }
+            // Parsing succeeded: store into the event slot, replacing any previous
+            if (node_contexts[node_id].p_msg_event)
+            {
+                free(node_contexts[node_id].p_msg_event);
+                node_contexts[node_id].p_msg_event = NULL;
+            }
+            node_contexts[node_id].p_msg_event = p_currentmsg;
         }
     }
 
@@ -731,9 +810,11 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
     // 4. Optionally, send a response or command back to this node
     //    websockserver_send(client_fd, response, strlen(response));
 
-    // Note: p_currentmsg is now stored in node_contexts[node_id].p_msg and will be:
-    // - Replaced when the next message from this node arrives
-    // - Freed when the node disconnects in nodeio_handle_disconnect()
+    // Note: transient parsed messages are stored in the per-node slots:
+    // - periodic/node_data -> node_contexts[node_id].p_msg_data
+    // - sporadic/node_event -> node_contexts[node_id].p_msg_event
+    // Each slot is replaced (and previous entry freed) when a later message of
+    // the same category arrives, and both slots are freed on disconnect.
 
     HEAP_TRACE_END(100); // Use higher threshold for message handling
 }
@@ -1039,7 +1120,7 @@ static void nodeio_handle_disconnect(int client_fd, uint8_t node_id)
     HEAP_TRACE_START("DISCONNECT");
 
     // Check if it is a duplicate call to disconnect, can happen in case of direct disconnect request from node
-    if (node_contexts[node_id].p_node == NULL && node_contexts[node_id].p_msg == NULL)
+    if (node_contexts[node_id].p_node == NULL && node_contexts[node_id].p_msg_data == NULL && node_contexts[node_id].p_msg_event == NULL)
     {
         // ESP_LOGW(TAG, "Node %d already disconnected, ignoring duplicate disconnect request", node_id);
         HEAP_TRACE_END_DEFAULT();
@@ -1054,11 +1135,17 @@ static void nodeio_handle_disconnect(int client_fd, uint8_t node_id)
         free(p_node);
         node_contexts[node_id].p_node = NULL;
     }
-    protocol_msg_t *p_msg = node_contexts[node_id].p_msg;
+    protocol_msg_t *p_msg = node_contexts[node_id].p_msg_data;
     if (p_msg)
     {
         free(p_msg);
-        node_contexts[node_id].p_msg = NULL;
+        node_contexts[node_id].p_msg_data = NULL;
+    }
+    protocol_msg_t *p_evt = node_contexts[node_id].p_msg_event;
+    if (p_evt)
+    {
+        free(p_evt);
+        node_contexts[node_id].p_msg_event = NULL;
     }
 
     // unsubscribe if subscribed
@@ -1209,8 +1296,9 @@ void nodeio_monitor_nodeslist(void)
     {
         if (node_contexts[i].p_node != NULL && node_contexts[i].p_node->current_state == NODEIO_STATE_CONNECTED && node_contexts[i].p_session->connected)
         {
-            // Cache p_msg locally and iterate through payload only if present
-            protocol_msg_t *pmsg = node_contexts[i].p_msg;
+            // Cache periodic and event message slots locally and iterate through payload only if present
+            protocol_msg_t *pmsg = node_contexts[i].p_msg_data;  // periodic/data message
+            protocol_msg_t *pevt = node_contexts[i].p_msg_event; // sporadic/event message
             if (pmsg)
             {
                 for (int j = 0; j < pmsg->payload.payload_count; j++)
@@ -1222,7 +1310,7 @@ void nodeio_monitor_nodeslist(void)
                         for (size_t s = 0; s < s_count; ++s)
                         {
                             float fv = 0.0f;
-                            if (nodeio_get_sensor_lut_field(node_contexts[i].p_msg, j, s_lut[s].name, 0, &fv, sizeof(fv)) == NIO_OK)
+                            if (nodeio_get_sensor_lut_field(pmsg, j, s_lut[s].name, 0, &fv, sizeof(fv)) == NIO_OK)
                             {
                                 // ESP_LOGI(TAG, "Node %d sensor payload: %s: %.2f", i, s_lut[s].name, fv);
                             }
@@ -1233,25 +1321,25 @@ void nodeio_monitor_nodeslist(void)
 
                     // Print each service diag or ota value if present (serialize via service helper)
                     char serbuf[128];
-                    if (nodeio_serialize_service_lut(node_contexts[i].p_msg, j, "diagnostics", serbuf, sizeof(serbuf)) == NIO_S_OK)
+                    if (nodeio_serialize_service_lut(pmsg, j, "diagnostics", serbuf, sizeof(serbuf)) == NIO_S_OK)
                     {
                         // ESP_LOGI(TAG, "Node %d service payload: Diag: %s", i, serbuf);
                     }
-                    if (nodeio_serialize_service_lut(node_contexts[i].p_msg, j, "ota_status", serbuf, sizeof(serbuf)) == NIO_S_OK)
+                    if (nodeio_serialize_service_lut(pmsg, j, "ota_status", serbuf, sizeof(serbuf)) == NIO_S_OK)
                     {
                         // ESP_LOGI(TAG, "Node %d service payload: OTA: %s", i, serbuf);
                     }
                 }
-                // After iterating periodic payloads, also print sporadic doorsense entries (if present)
-                if (pmsg)
+                // After iterating periodic payloads, also print sporadic doorsense entries (if present) from the event slot
+                if (pevt)
                 {
                     const field_lookup_t *fld = nodeio_find_sensors_lut_field_by_name("doorsense");
-                    if (fld && (pmsg->payload.sporadic_data.current_cap_mask & fld->cap))
+                    if (fld && (pevt->payload.sporadic_data.current_cap_mask & fld->cap))
                     {
                         for (size_t di = 0; di < fld->elem_count; ++di)
                         {
                             uint8_t v = 0xFF;
-                            if (nodeio_get_sensor_lut_field(pmsg, 0, "doorsense", di, &v, sizeof(v)) == NIO_OK)
+                            if (nodeio_get_sensor_lut_field(pevt, 0, "doorsense", di, &v, sizeof(v)) == NIO_OK)
                             {
                                 const char *sval = "UNKNOWN";
                                 if (v == 1)
@@ -1266,12 +1354,12 @@ void nodeio_monitor_nodeslist(void)
                     {
                         /* also accept legacy 'door_state' if present in sporadic current_cap_mask via aliasing */
                         const field_lookup_t *legacy = nodeio_find_sensors_lut_field_by_name("door_state");
-                        if (legacy && (pmsg->payload.sporadic_data.current_cap_mask & legacy->cap))
+                        if (legacy && (pevt->payload.sporadic_data.current_cap_mask & legacy->cap))
                         {
                             for (size_t di = 0; di < legacy->elem_count; ++di)
                             {
                                 uint8_t v = 0xFF;
-                                if (nodeio_get_sensor_lut_field(pmsg, 0, "door_state", di, &v, sizeof(v)) == NIO_OK)
+                                if (nodeio_get_sensor_lut_field(pevt, 0, "door_state", di, &v, sizeof(v)) == NIO_OK)
                                 {
                                     const char *sval = "UNKNOWN";
                                     if (v == 1)
@@ -1347,8 +1435,9 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
     for (int i = 0; i < MAX_NODES; i++)
     {
         node_context_t *ctx = &node_contexts[i];
-        /* Snapshot the message pointer to avoid races while formatting JSON */
-        protocol_msg_t *pmsg = ctx->p_msg;
+        /* Snapshot the periodic and event message pointers to avoid races while formatting JSON */
+        protocol_msg_t *pmsg = ctx->p_msg_data;  /* periodic/data message */
+        protocol_msg_t *pevt = ctx->p_msg_event; /* sporadic/event message */
 
         // ESP_LOGD(TAG, "Node context %d: p_node=%p, p_session=%p, p_msg=%p",
         //          i, (void *)ctx->p_node, (void *)ctx->p_session, (void *)ctx->p_msg);
@@ -1495,29 +1584,67 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
 
                 /* doorsense canonical field */
                 const field_lookup_t *ds_fld = nodeio_find_sensors_lut_field_by_name("doorsense");
-                if (pmsg && ds_fld && (pmsg->payload.sporadic_data.current_cap_mask & ds_fld->cap))
+                /* Prefer sporadic/event slot for doorsense values; fall back to periodic payload if present */
+                protocol_msg_t *sporadic_source = pevt ? pevt : pmsg;
+                if (sporadic_source && ds_fld && (sporadic_source->payload.sporadic_data.current_cap_mask & ds_fld->cap))
                 {
                     /* Emit numeric array of door states (0/1/255 for unknown) */
                     if (json_append(json, json_size, &offset, "\"doorsense\":[") < 0)
                         break;
 
-                    for (size_t di = 0; di < ds_fld->elem_count; ++di)
+                    /* For FIELD_TYPE_UINT8_ARRAY (doorsense) the getter expects a buffer
+                       sized to the full element count; call it once and then emit each
+                       element locally. This avoids passing a 1-byte buffer which the
+                       getter rejects and which previously left values as UNKNOWN. */
                     {
-                        uint8_t v = 0xFF;
-                        (void)nodeio_get_sensor_lut_field(pmsg, 0, "doorsense", di, &v, sizeof(v));
-                        /* Emit as string value */
-                        const char *sval = "UNKNOWN";
-                        if (v == 1)
-                            sval = "OPEN";
-                        else if (v == 0)
-                            sval = "CLOSED";
-                        if (json_append(json, json_size, &offset, "%s\"%s\"", (di == 0) ? "" : "", sval) < 0)
-                            break;
-                        /* append comma between elements except last */
-                        if (di + 1 < ds_fld->elem_count)
+                        size_t elem_cnt = ds_fld->elem_count;
+                        uint8_t dsbuf[NUM_DOOR_SENSORS]; /* NUM_DOOR_SENSORS is compile-time constant in headers */
+                        /* zero-init to unknown (0xFF) for safety */
+                        for (size_t z = 0; z < elem_cnt; ++z)
+                            dsbuf[z] = 0xFF;
+
+                        /* Temporary publish-time debug: log which source we use and current sporadic cap mask */
+                        ESP_LOGI(TAG, "publish nodeslist: node %d doorsense source=%s ptr=%p sporadic_cap_mask=0x%08X",
+                                 ctx->p_node->node_id, (pevt ? "event" : "periodic"), (void *)sporadic_source,
+                                 (unsigned)sporadic_source->payload.sporadic_data.current_cap_mask);
+
+                        if (nodeio_get_sensor_lut_field(sporadic_source, 0, "doorsense", 0, dsbuf, elem_cnt * sizeof(uint8_t)) == NIO_OK)
                         {
-                            if (json_append(json, json_size, &offset, ",") < 0)
-                                break;
+                            /* build a small readable string for logging */
+                            char dbg[64];
+                            int dbg_off = 0;
+                            for (size_t di = 0; di < elem_cnt && dbg_off < (int)sizeof(dbg) - 8; ++di)
+                            {
+                                const char *sval = "UNKNOWN";
+                                if (dsbuf[di] == 1)
+                                    sval = "OPEN";
+                                else if (dsbuf[di] == 0)
+                                    sval = "CLOSED";
+                                dbg_off += snprintf(dbg + dbg_off, sizeof(dbg) - dbg_off, "%s%s", (di == 0) ? "" : ",", sval);
+                            }
+                            dbg[sizeof(dbg) - 1] = '\0';
+                            ESP_LOGI(TAG, "publish nodeslist: node %d doorsense values: [%s]", ctx->p_node->node_id, dbg);
+
+                            for (size_t di = 0; di < elem_cnt; ++di)
+                            {
+                                uint8_t v = dsbuf[di];
+                                const char *sval = "UNKNOWN";
+                                if (v == 1)
+                                    sval = "OPEN";
+                                else if (v == 0)
+                                    sval = "CLOSED";
+                                if (json_append(json, json_size, &offset, "%s\"%s\"", (di == 0) ? "" : ",", sval) < 0)
+                                    break;
+                            }
+                        }
+                        else
+                        {
+                            /* Getter failed for some reason; emit UNKNOWN elements to preserve shape */
+                            for (size_t di = 0; di < elem_cnt; ++di)
+                            {
+                                if (json_append(json, json_size, &offset, "%s\"%s\"", (di == 0) ? "" : ",", "UNKNOWN") < 0)
+                                    break;
+                            }
                         }
                     }
 

@@ -353,3 +353,20 @@ button {
     font-size: 0.98em;
     margin-top: 2px;
 }
+
+/* Event / sporadic rows (doors, alerts, etc.) */
+.event-row {
+    margin-top: 6px;
+    color: #2b7;
+    font-weight: 600;
+    font-size: 0.98em;
+}
+
+.event-row.event-doorsense {
+    color: #2b7;
+}
+
+.event-row.event-alert {
+    color: #d32f2f;
+    font-weight: 700;
+}

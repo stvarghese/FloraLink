@@ -10,156 +10,11 @@ import os
 import threading
 import contextlib
 from contextlib import contextmanager
+import argparse
+import signal
 
-# Optional nice UI: colors and interactive prompt
-try:
-    import colorama
-    colorama.init()
-    _HAS_COLORAMA = True
-except Exception:
-    _HAS_COLORAMA = False
-
-try:
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.history import InMemoryHistory
-    from prompt_toolkit.styles import Style
-    _HAS_PROMPT_TOOLKIT = True
-except Exception:
-    _HAS_PROMPT_TOOLKIT = False
-
-
-class Logger:
-    """Simple colored logger used by the testnode client.
-
-    Logging respects an asyncio.Event to enable/disable live log printing
-    (used to pause logs while in command mode).
-    """
-    ANSI_RESET = '\x1b[0m'
-    COLORS = [
-        '\x1b[38;5;39m',  # blue
-        '\x1b[38;5;82m',  # green
-        '\x1b[38;5;214m', # orange
-        '\x1b[38;5;201m', # pink
-        '\x1b[38;5;226m', # yellow
-        '\x1b[38;5;51m',  # cyan
-        '\x1b[38;5;208m', # coral
-        '\x1b[38;5;45m',  # teal
-    ]
-
-    def __init__(self):
-        self._enabled_event = None
-
-    def set_enabled_event(self, ev: 'asyncio.Event'):
-        self._enabled_event = ev
-
-    def _enabled(self):
-        return (self._enabled_event is None) or (self._enabled_event.is_set())
-
-    def _color(self, s, color_code):
-        if _HAS_COLORAMA or os.name != 'nt':
-            return f"{color_code}{s}{self.ANSI_RESET}"
-        return s
-
-    def info(self, msg: str):
-        if not self._enabled():
-            return
-        ts = time.strftime('%H:%M:%S')
-        global LAST_ACTIVITY
-        LAST_ACTIVITY = time.time()
-        print(self._color(f"[{ts}] {msg}", '\x1b[37m'))
-
-    def node(self, node_id: int, msg: str, kind: str = 'INFO', payload=None):
-        if not self._enabled():
-            return
-        ts = time.strftime('%H:%M:%S')
-        global LAST_ACTIVITY
-        LAST_ACTIVITY = time.time()
-        color = self.COLORS[node_id % len(self.COLORS)]
-        header = f"[{ts}] Node {node_id:02d} | {kind}"
-        hdr = self._color(header, color)
-        if payload is None:
-            print(f"{hdr} - {msg}")
-        else:
-            # pretty-print small payloads inline, larger payloads as JSON
-            try:
-                s = json.dumps(payload, ensure_ascii=False)
-            except Exception:
-                s = str(payload)
-            print(f"{hdr} - {msg}: {s}")
-
-    def warn(self, msg: str):
-        if not self._enabled():
-            return
-        ts = time.strftime('%H:%M:%S')
-        global LAST_ACTIVITY
-        LAST_ACTIVITY = time.time()
-        print(self._color(f"[{ts}] WARN: {msg}", '\x1b[38;5;208m'))
-
-    def error(self, msg: str):
-        ts = time.strftime('%H:%M:%S')
-        global LAST_ACTIVITY
-        LAST_ACTIVITY = time.time()
-        print(self._color(f"[{ts}] ERROR: {msg}", '\x1b[38;5;196m'))
-
-    def prompt(self):
-        # Synchronous fallback prompt (used when prompt_toolkit not available).
-        try:
-            return input(self._color('> ', '\x1b[36m'))
-        except EOFError:
-            return ''
-
-
-async def _spinner_task(stop_event: asyncio.Event):
-    """Background spinner shown when idle for SPINNER_IDLE_SECONDS."""
-    idx = 0
-    printed = False
-    while not stop_event.is_set():
-        # Don't show spinner while logs are disabled (command mode) or when using prompt_toolkit
-        try:
-            enabled = LOGGER._enabled()
-        except Exception:
-            enabled = True
-        if (not enabled) or _HAS_PROMPT_TOOLKIT:
-            if printed:
-                # clear previous spinner
-                print('\r' + ' ' * 60 + '\r', end='', flush=True)
-                printed = False
-            await asyncio.sleep(0.2)
-            continue
-
-        now = time.time()
-        if now - LAST_ACTIVITY < SPINNER_IDLE_SECONDS:
-            # Not idle
-            if printed:
-                print('\r' + ' ' * 60 + '\r', end='', flush=True)
-                printed = False
-            await asyncio.sleep(0.2)
-            continue
-
-        # Show spinner inline
-        ch = SPINNER_CHARS[idx % len(SPINNER_CHARS)]
-        print(f"\r{ch} idle... press 'cmd' to enter command mode", end='', flush=True)
-        printed = True
-        idx += 1
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=0.15)
-        except asyncio.TimeoutError:
-            pass
-
-    # clear spinner line on exit
-    if printed:
-        print('\r' + ' ' * 60 + '\r', end='', flush=True)
-
-
-# Global logger instance
-LOGGER = Logger()
-
-# Timestamp of last visible activity (seconds since epoch)
-LAST_ACTIVITY = time.time()
-
-# Idle spinner settings
-SPINNER_IDLE_SECONDS = 2.0
-SPINNER_CHARS = ['|', '/', '-', '\\']
+# Global stop event set by SIGINT handler to improve Ctrl-C responsiveness
+STOP_EVENT = threading.Event()
 
 # Protocol constants (should match nodeioprotocol.h)
 PROTOCOL_MAGIC = 0xBEEFBEEF
@@ -170,52 +25,21 @@ MSG_PAYLOAD_TYPE_SENSOR = "sensor"
 MSG_PAYLOAD_TYPE_DIAGNOSTICS = "diagnostics"
 MSG_PAYLOAD_TYPE_OTA_STATUS = "ota_status"
 MSG_TYP_DISCONNECT_REQUEST = "disconnect_request"
-MSG_TYP_NODE_EVENT = "node_event"
-MSG_EVENT_DOOR = "EVENT_DOOR"
-MSG_EVENT_SERVICE = "EVENT_SERVICE"
+MSG_PAYLOAD_TYPE_EVENT = "event"
 
 SAMPLE_MSG_PATH = os.path.join(os.path.dirname(__file__), "..", "main", "samplenodemsg.json")
-
-# Attempt to auto-detect NUM_DOOR_SENSORS from the C header so the test client
-# stays in sync with the firmware's declaration. Falls back to 1 if parsing fails.
-def _detect_num_door_sensors():
-    try:
-        hdr = os.path.join(os.path.dirname(__file__), '..', 'main', 'nodeioprotocol.h')
-        with open(hdr, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith('#define') and 'NUM_DOOR_SENSORS' in line:
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        try:
-                            return int(parts[2])
-                        except Exception:
-                            pass
-    except Exception:
-        pass
-    return 1
-
-DOOR_COUNT = _detect_num_door_sensors()
 
 def build_base_message(msg_type, node_id, seq_num):
     # Ensure node_id is numeric for strict backend parsing
     node_id = int(node_id)
-    sensors_default = ["temperature", "humidity", "moisture"]
-    # Advertise doorsense capability when door sensors exist so the hub accepts door events
-    try:
-        if DOOR_COUNT and DOOR_COUNT > 0:
-            sensors_default.append("doorsense")
-    except NameError:
-        pass
-
     return {
         "magic": PROTOCOL_MAGIC,
         "type": msg_type,
         "node_id": node_id,
         "controller": 2,  # CONTROLLER_ARDUINO
         "sw_version": "1.0.0",
-        "sensors": sensors_default,
-    "services": ["diagnostics", "ota_status"],
+        "sensors": ["temperature", "humidity", "moisture", "doorsense"],
+        "services": ["diagnostics", "ota"],
         "seq_num": seq_num,
         "timestamp": int(time.time()),
     }
@@ -227,6 +51,9 @@ def build_payloads(sensors):
     t = int(time.time())
     sensor_values = {}
     for idx, s in enumerate(sensors):
+        # Doorsense is a sporadic/event-driven sensor. Do not include it in periodic payloads.
+        if s == "doorsense":
+            continue
         if s == "temperature":
             sensor_values[s] = 20.0 + (t % 10)  # 20..29 C
         elif s == "humidity":
@@ -263,28 +90,7 @@ def build_payloads(sensors):
 
     return [sensor_payload, diagnostics_payload, ota_status_payload]
 
-
-def build_event_message(node_id, seq_num, event_type, event_fields: dict):
-    """Build a node_event message where payload is a single object."""
-    msg = build_base_message(MSG_TYP_NODE_EVENT, node_id, seq_num)
-    payload = {"event_type": event_type}
-    payload.update(event_fields)
-    msg["payload"] = payload
-    return msg
-
-
-def build_door_event_descriptor(door_states):
-    """Return an event descriptor for door states (list of strings or numbers)."""
-    return {"kind": "door", "states": list(door_states)}
-
-
-def build_service_event_descriptor(name, **kwargs):
-    """Return an event descriptor for a service event. kwargs depend on service."""
-    desc = {"kind": "service", "name": name}
-    desc.update(kwargs)
-    return desc
-
-async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_enabled, disconnect_event=None, send_event=None, event_queue=None, event_trigger=None):
+async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_enabled, disconnect_event=None, send_event=None, config=None, event_queue=None):
     """
     Simulates a single node over a websocket connection.
 
@@ -301,19 +107,12 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
     """
 
     def log(msg):
-        LOGGER.node(node_id, msg, kind='INFO')
+        if log_enabled.is_set():
+            print(msg)
 
     websocket = None
     recv_task = None
     seq_num = 1
-    # Subscription state (updated by notify_subscription messages received from hub)
-    subscription_active = True  # default: behave as before (send) until hub unsubscribes
-    subscription_filters = {
-        'sensors': set(sample_msg.get('sensors', [])),
-        'services': set(sample_msg.get('services', []))
-    }
-    # current send interval in seconds (can be updated via notify_subscription payload.interval in ms)
-    current_interval = float(interval) if interval is not None else 0.0
 
     try:
         # === Connect phase ===
@@ -327,9 +126,9 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                 ping_interval=None,
                 max_size=2**20,
             )
-            LOGGER.node(node_id, f"Connected to {uri} (subprotocol: {websocket.subprotocol})", kind='CONNECT')
+            log(f"[Node {node_id}] Connected to {uri} (subprotocol: {websocket.subprotocol})")
             if websocket.subprotocol != "arduino":
-                LOGGER.node(node_id, f"Warning: negotiated subprotocol is '{websocket.subprotocol}', expected 'arduino'", kind='WARN')
+                log(f"[Node {node_id}] Warning: negotiated subprotocol is '{websocket.subprotocol}', expected 'arduino'")
         except getattr(websockets, 'NegotiationError', Exception) as e:  # older/newer websockets versions
             log(f"[Node {node_id}] Subprotocol negotiation failed: {e}")
             if disconnect_event:
@@ -344,156 +143,156 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
         # Send connect request
         connect_req = build_base_message(MSG_TYP_CONNECT, node_id, 0)
         await websocket.send(json.dumps(connect_req))
-        LOGGER.node(node_id, "Sent connect request", kind='TX')
+        log(f"[Node {node_id}] Sent connect request")
 
         # Wait for acceptance
         try:
             response = await asyncio.wait_for(websocket.recv(), timeout=10)
-            LOGGER.node(node_id, "Received", kind='RX', payload=json.loads(response) if response else None)
+            log(f"[Node {node_id}] Received: {response}")
             resp_obj = json.loads(response)
             if resp_obj.get("type") != "connect_response" or resp_obj.get("status") != "accepted":
                 log(f"[Node {node_id}] Connection not accepted. Exiting.")
                 return
         except asyncio.TimeoutError:
-            LOGGER.node(node_id, "No response to connect request (timeout). Exiting.", kind='WARN')
+            log(f"[Node {node_id}] No response to connect request (timeout). Exiting.")
             if disconnect_event:
                 disconnect_event.set()
             return
 
-        # Prepare an event so the receiver can signal when a notify_subscription arrives
-        subscription_ready = asyncio.Event()
-
         # Start background receiver to process control frames (ping/pong) and any messages
         async def _receiver():
-            nonlocal subscription_active, subscription_filters, current_interval, subscription_ready
             try:
+                nonlocal seq_num
                 while True:
                     try:
                         msg = await websocket.recv()
                         # Optional: log unexpected server pushes
+                        if log_enabled.is_set():
+                            print(f"[Node {node_id}] <- {msg}")
+                        # Try JSON decode and dispatch known control messages
                         try:
-                            j = json.loads(msg) if msg else None
+                            msg_obj = json.loads(msg)
                         except Exception:
-                            j = None
-                        LOGGER.node(node_id, "<- server push", kind='RX', payload=j)
+                            msg_obj = None
 
-                        # Honor hub subscription notifications: update local subscription state
-                        if isinstance(j, dict):
-                            t = j.get('type')
-                            # some servers send notify_subscription without 'magic' envelope
-                            # Accept notify_subscription addressed to this node OR without node_id
-                            if t == 'notify_subscription' and (j.get('node_id') is None or j.get('node_id') == node_id):
-                                raw_payload = j.get('payload', None)
-                                # Hub may send a null payload to mean "unsubscribed"
-                                if raw_payload is None:
-                                    subscription_active = False
-                                    subscription_filters = {'sensors': set(), 'services': set()}
-                                    LOGGER.node(node_id, "Unsubscribed by hub (null payload)", kind='INFO')
-                                    subscription_ready.set()
-                                elif isinstance(raw_payload, dict):
-                                    payload = raw_payload
-                                    status = payload.get('status')
-                                    if status == 'subscribed':
-                                        subscription_active = True
-                                        flt = payload.get('filter') or {}
-                                        s = flt.get('sensors')
-                                        sv = flt.get('services')
-                                        if isinstance(s, list):
-                                            subscription_filters['sensors'] = set(s)
-                                        if isinstance(sv, list):
-                                            subscription_filters['services'] = set(sv)
-                                        # update interval if provided (ms)
-                                        if isinstance(payload.get('interval'), (int, float)):
+                        if isinstance(msg_obj, dict):
+                            mtype = msg_obj.get("type")
+                            # Only process messages addressed to this node (if node_id present)
+                            msg_node_id = msg_obj.get("node_id")
+                            if msg_node_id is not None and int(msg_node_id) != int(node_id):
+                                # Not for this node
+                                continue
+
+                            # notify_subscription: adjust interval and filter
+                            if mtype == "notify_subscription":
+                                payload = msg_obj.get("payload", {})
+                                status = payload.get("status")
+                                filt = payload.get("filter", {}) or {}
+                                interval_ms = payload.get("interval")
+                                if status == "subscribed":
+                                    # update per-node config (if provided)
+                                    if config is not None:
+                                        # filters may omit sensors/services; keep existing when omitted
+                                        sensors = filt.get("sensors")
+                                        services = filt.get("services")
+                                        if sensors is not None:
+                                            config["sensors"] = sensors
+                                        if services is not None:
+                                            config["services"] = services
+                                        if interval_ms is not None:
+                                            # hub uses milliseconds in examples
                                             try:
-                                                current_interval = float(payload.get('interval')) / 1000.0
+                                                config["interval"] = float(interval_ms) / 1000.0
                                             except Exception:
                                                 pass
-                                        LOGGER.node(node_id, f"Subscription updated: status={status}, filters={subscription_filters}, interval={current_interval}s", kind='INFO')
-                                        subscription_ready.set()
-                                    elif status == 'unsubscribed':
-                                        subscription_active = False
-                                        subscription_filters = {'sensors': set(), 'services': set()}
-                                        LOGGER.node(node_id, f"Unsubscribed by hub", kind='INFO')
-                                        subscription_ready.set()
+                                        config["subscribed"] = True
+                                    # ensure sending is active
+                                    control_event.set()
+                                    if log_enabled.is_set():
+                                        print(f"[Node {node_id}] Subscribed: sensors={config.get('sensors')}, services={config.get('services')}, interval={config.get('interval')}")
+                                elif status == "unsubscribed":
+                                    if config is not None:
+                                        config["subscribed"] = False
+                                    control_event.clear()
+                                    if log_enabled.is_set():
+                                        print(f"[Node {node_id}] Unsubscribed by hub")
+
+                            # (poll_data handling intentionally omitted in this tester)
+
                     except asyncio.CancelledError:
                         break
                     except websockets.ConnectionClosed:  # server closed
                         break
                     except Exception as e:
                         # Keep receiving unless fatal
-                        LOGGER.node(node_id, f"Receiver error: {e}", kind='ERROR')
+                        if log_enabled.is_set():
+                            print(f"[Node {node_id}] Receiver error: {e}")
                         await asyncio.sleep(0.05)
             finally:
                 return
 
         recv_task = asyncio.create_task(_receiver())
 
-        # Wait a short time for an initial notify_subscription from the hub.
-        # Many hubs send notify_subscription immediately after connect; if we get
-        # an explicit 'unsubscribed' within this window we should avoid sending
-        # the initial telemetry. If no notify arrives, proceed as before.
-        # Wait up to one interval (or 0.5s minimum) for the hub to send an initial
-        # notify_subscription. If we don't receive it, proceed to avoid hanging.
-        try:
-            timeout_secs = max(0.5, float(interval) if interval and float(interval) > 0 else 0.5)
-        except Exception:
-            timeout_secs = 0.5
-        try:
-            await asyncio.wait_for(subscription_ready.wait(), timeout=timeout_secs)
-        except asyncio.TimeoutError:
-            pass
-
         # === Active phase ===
-        manual_mode = (interval is None) or (float(interval) == 0.0)
+        # Initialize per-node config if not provided
+        if config is None:
+            config = {
+                "interval": (float(interval) if (interval is not None and float(interval) > 0.0) else None),
+                "sensors": sample_msg.get("sensors", ["temperature", "humidity", "moisture"]),
+                "services": sample_msg.get("services", ["diagnostics", "ota"]),
+                # Default to unsubscribed so node waits for hub notify_subscription
+                "subscribed": False,
+            }
+
+        # manual mode is determined dynamically from config['interval'] (None/0 => manual)
         while True:
             try:
+                # If a global stop has been requested (SIGINT), signal disconnect
+                if STOP_EVENT.is_set():
+                    if disconnect_event:
+                        disconnect_event.set()
+                    # allow the normal disconnect handling at top of loop to run
+                    await asyncio.sleep(0)
+
                 # Graceful disconnect requested externally
                 if disconnect_event and disconnect_event.is_set():
                     disconnect_msg = build_base_message(MSG_TYP_DISCONNECT_REQUEST, node_id, seq_num)
-                    LOGGER.node(node_id, "Sending disconnect request", kind='TX')
+                    log(f"[Node {node_id}] Sending disconnect request")
                     await websocket.send(json.dumps(disconnect_msg))
-                    LOGGER.node(node_id, "Sent disconnect request", kind='TX')
+                    log(f"[Node {node_id}] Sent disconnect request")
                     return  # exit loop → final cleanup happens in finally
 
                 # Wait until allowed to send (pause/resume)
                 await control_event.wait()
 
-                # First, drain any queued events and send them immediately
-                event_sent = False
+                # First, drain any queued sporadic events and send them immediately
                 if event_queue is not None:
+                    # Drain all pending events
                     while True:
                         try:
                             ev = event_queue.get_nowait()
-                        except asyncio.QueueEmpty:
+                        except Exception:
                             break
-                        try:
-                            # Only send events if hub has subscribed (or if we have no filters)
-                            can_send_event = subscription_active
-                            # Further filter door events (sensor-like) vs service events
-                            if can_send_event and isinstance(ev, dict):
-                                p = ev.get('payload') or ev.get('payload', {})
-                                # node_event with kind 'door' uses sensor name 'door_state'
-                                et = p.get('event_type') if isinstance(p, dict) else None
-                                if et == MSG_EVENT_DOOR:
-                                    # require subscription to either 'doorsense' or legacy 'door_state' sensor
-                                    allowed_sensors = subscription_filters.get('sensors', set())
-                                    if ('doorsense' not in allowed_sensors) and ('door_state' not in allowed_sensors):
-                                        can_send_event = False
-                                elif et == MSG_EVENT_SERVICE:
-                                    svcname = (p.get('name') if isinstance(p, dict) else None)
-                                    if svcname and svcname not in subscription_filters.get('services', set()):
-                                        can_send_event = False
-                            if can_send_event:
-                                await websocket.send(json.dumps(ev))
-                                LOGGER.node(node_id, "Sent event", kind='EVENT', payload=ev.get('payload', ev))
+                        # ev expected to be dict: {"event_type": str, ...other fields...}
+                        if isinstance(ev, dict):
+                            out = {
+                                "magic": PROTOCOL_MAGIC,
+                                "type": "node_event",
+                                "node_id": int(node_id),
+                                "seq_num": seq_num,
+                                "timestamp": int(time.time()),
+                                "payload": ev,
+                            }
+                            try:
+                                await websocket.send(json.dumps(out))
+                                log(f"[Node {node_id}] Sent event: {ev.get('event_type')}")
                                 seq_num += 1
-                                event_sent = True
-                            else:
-                                LOGGER.node(node_id, "Dropping queued event due to subscription filter", kind='INFO', payload=ev.get('payload', ev))
-                        except Exception as e:
-                            LOGGER.node(node_id, f"Failed to send event: {e}", kind='ERROR')
+                            except Exception as e:
+                                log(f"[Node {node_id}] Failed sending event: {e}")
 
-                if manual_mode:
+                # Determine current mode & sensors/services from config
+                current_interval = config.get("interval")
+                if current_interval is None or float(current_interval) == 0.0:
                     # Manual mode: wait for an explicit trigger to send one payload
                     if send_event is None:
                         # Safety: if no send_event provided, just idle
@@ -506,91 +305,61 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                     await send_event.wait()
                     # Clear the event (one-shot)
                     send_event.clear()
-                    # Build and send one payload
-                    sensors = sample_msg.get("sensors", ["temperature", "humidity", "moisture"])
-                    services = sample_msg.get("services", ["diagnostics", "ota"])
-                    # Apply subscription filters: only include sensors/services the hub subscribed to
-                    if subscription_filters and isinstance(subscription_filters.get('sensors'), set):
-                        sensors = [s for s in sensors if s in subscription_filters.get('sensors', set())]
-                    if subscription_filters and isinstance(subscription_filters.get('services'), set):
-                        services = [s for s in services if s in subscription_filters.get('services', set())]
+                    # Build and send one payload using config filters
+                    sensors = config.get("sensors", sample_msg.get("sensors", ["temperature", "humidity", "moisture"]))
+                    services = config.get("services", sample_msg.get("services", ["diagnostics", "ota"]))
                     msg = build_base_message(MSG_TYP_NODE_DATA, node_id, seq_num)
                     msg["sensors"] = sensors
                     msg["services"] = services
                     msg["payload"] = build_payloads(sensors)
                     await websocket.send(json.dumps(msg))
-                    LOGGER.node(node_id, "Sent live data (manual)", kind='TX', payload=msg["payload"]) 
+                    log(f"[Node {node_id}] Sent live data (manual)")
                     seq_num += 1
                 else:
-                    # Periodic mode
-                    sensors = sample_msg.get("sensors", ["temperature", "humidity", "moisture"])
-                    services = sample_msg.get("services", ["diagnostics", "ota"])
-                    # Only send if subscription is active
-                    if subscription_active:
-                        # Apply subscription filters
-                        if subscription_filters and isinstance(subscription_filters.get('sensors'), set):
-                            sensors = [s for s in sensors if s in subscription_filters.get('sensors', set())]
-                        if subscription_filters and isinstance(subscription_filters.get('services'), set):
-                            services = [s for s in services if s in subscription_filters.get('services', set())]
-                        # If we already sent an event in this iteration, skip sending the periodic
-                        # node_data now; let the periodic timer deliver it on the next tick. This
-                        # keeps sporadic events independent from the periodic telemetry schedule.
-                        if not event_sent:
-                            msg = build_base_message(MSG_TYP_NODE_DATA, node_id, seq_num)
-                            msg["sensors"] = sensors
-                            msg["services"] = services
-                            msg["payload"] = build_payloads(sensors)
+                    # Periodic mode (interval in seconds)
+                    sensors = config.get("sensors", sample_msg.get("sensors", ["temperature", "humidity", "moisture"]))
+                    services = config.get("services", sample_msg.get("services", ["diagnostics", "ota"]))
 
-                            await websocket.send(json.dumps(msg))
-                            LOGGER.node(node_id, "Sent live data", kind='TX', payload=msg["payload"])
+                    # Determine if any of the configured sensors are periodic (i.e., not sporadic like 'doorsense')
+                    sporadic_sensors = {"doorsense", "door_state"}
+                    has_periodic = any((s not in sporadic_sensors) for s in sensors)
 
-                            seq_num += 1
+                    if has_periodic:
+                        msg = build_base_message(MSG_TYP_NODE_DATA, node_id, seq_num)
+                        msg["sensors"] = sensors
+                        msg["services"] = services
+                        msg["payload"] = build_payloads(sensors)
 
-                    # Receiver runs in background; no foreground recv needed
+                        await websocket.send(json.dumps(msg))
+                        log(f"[Node {node_id}] Sent live data")
 
-                        # Wait for next send cycle, disconnect trigger, or an event trigger which
-                        # signals that a sporadic event has been queued for immediate send.
-                        try:
-                            wait_t = current_interval if current_interval and current_interval > 0 else interval
-                            # Wait for either disconnect_event or event_trigger (if provided)
-                            if event_trigger is not None:
-                                # asyncio.wait does not accept bare coroutines in all versions;
-                                # wrap in tasks so we can cancel pending ones safely.
-                                t1 = asyncio.create_task(disconnect_event.wait())
-                                t2 = asyncio.create_task(event_trigger.wait())
-                                try:
-                                    done, pending = await asyncio.wait({t1, t2}, timeout=wait_t, return_when=asyncio.FIRST_COMPLETED)
-                                    # If event_trigger woke us, clear it so future waits behave normally
-                                    if not t2.cancelled() and t2.done() and t2.result() is True:
-                                        # clear trigger for next cycle
-                                        try:
-                                            event_trigger.clear()
-                                        except Exception:
-                                            pass
-                                finally:
-                                    # Cancel any leftover tasks
-                                    for p in (t1, t2):
-                                        if not p.done():
-                                            p.cancel()
-                                            with contextlib.suppress(asyncio.CancelledError):
-                                                await p
-                            else:
-                                await asyncio.wait_for(asyncio.shield(disconnect_event.wait()), timeout=wait_t)
-                        except asyncio.TimeoutError:
-                            pass  # normal interval tick
+                        seq_num += 1
+                    # else:
+                        # Hub subscription contains only sporadic sensors (e.g., doorsense).
+                        # Do not send periodic node_data - the node should instead send sporadic
+                        # events via the event queue when they occur. Sleep until the next interval
+                        # or until disconnect; draining of event_queue happens earlier in the loop.
+                        # if log_enabled.is_set():
+                            # print(f"[Node {node_id}] Subscription contains only sporadic sensors; skipping periodic node_data")
+
+                    # Wait for next send cycle or disconnect trigger
+                    try:
+                        await asyncio.wait_for(asyncio.shield(disconnect_event.wait()), timeout=current_interval)
+                    except asyncio.TimeoutError:
+                        pass  # normal interval tick
 
             except asyncio.CancelledError:
                 # Handle task cancellation gracefully
                 disconnect_msg = build_base_message(MSG_TYP_DISCONNECT_REQUEST, node_id, seq_num)
                 try:
                     await websocket.send(json.dumps(disconnect_msg))
-                    LOGGER.node(node_id, "Sent disconnect request (cancel)", kind='TX')
+                    log(f"[Node {node_id}] Sent disconnect request (cancel)")
                 except Exception:
                     pass
                 raise  # re-raise so outer task manager knows
 
     except Exception as e:
-        LOGGER.node(node_id, f"Exception: {e}", kind='ERROR')
+        log(f"[Node {node_id}] Exception: {e}")
         if disconnect_event:
             disconnect_event.set()
 
@@ -604,20 +373,19 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
             except Exception:
                 pass
         if websocket is not None:
-                try:
-                    await websocket.close()
-                    await websocket.wait_closed()
-                    LOGGER.node(node_id, "Connection closed cleanly.", kind='INFO')
-                except Exception as e:
-                    LOGGER.node(node_id, f"Error during final close: {e}", kind='ERROR')
+            try:
+                await websocket.close()
+                await websocket.wait_closed()
+                log(f"[Node {node_id}] Connection closed cleanly.")
+            except Exception as e:
+                log(f"[Node {node_id}] Error during final close: {e}")
 
 class NodeManager:
     def __init__(self, uri, interval, sample_msg, log_enabled):
         self.uri = uri
         self.interval = interval
         self.sample_msg = sample_msg
-        # node_tasks maps node_id -> (task, control_event, disconnect_event, send_event, event_queue)
-        self.node_tasks = {}  # node_id: (task, control_event, disconnect_event, send_event, event_queue)
+        self.node_tasks = {}  # node_id: (task, control_event, disconnect_event, send_event, config, event_queue)
         self.lock = asyncio.Lock()
         self.log_enabled = log_enabled
         # Janitor to proactively clean stale/disconnected nodes
@@ -629,7 +397,7 @@ class NodeManager:
             stale = []
             # Collect stale nodes under lock
             async with self.lock:
-                for node_id, (task, _control_event, disconnect_event, _send_event, _event_queue, _event_trigger) in list(self.node_tasks.items()):
+                for node_id, (task, _control_event, disconnect_event, _send_event, _config, _evtq) in list(self.node_tasks.items()):
                     if task.done() or disconnect_event.is_set():
                         # Remove from registry; we'll await outside of lock
                         self.node_tasks.pop(node_id, None)
@@ -678,7 +446,7 @@ class NodeManager:
                     print(f"Node {node_id} is out of allowed range (0-{MAX_NODES-1}).")
                     continue
                 if node_id in self.node_tasks:
-                    task, control_event, disconnect_event, send_event, event_queue, event_trigger = self.node_tasks[node_id]
+                    task, control_event, disconnect_event, send_event, _cfg, _evtq = self.node_tasks[node_id]
                     if task.done() or (disconnect_event.is_set()):
                         # Stale entry; remove and allow re-add
                         self.node_tasks.pop(node_id, None)
@@ -686,15 +454,25 @@ class NodeManager:
                         print(f"Node {node_id} already exists.")
                         continue
                 control_event = asyncio.Event()
-                control_event.set()  # Start as active
+                # Start paused: follow hub-controlled subscription model.
+                # Nodes will remain paused until they receive a notify_subscription
+                # with status 'subscribed'. This matches the protocol behavior.
+                control_event = asyncio.Event()
                 disconnect_event = asyncio.Event()
                 send_event = asyncio.Event()
                 event_queue = asyncio.Queue()
-                event_trigger = asyncio.Event()
+                # Create per-node config and pass into simulate_node
+                cfg = {
+                    "interval": (float(self.interval) if (self.interval is not None and float(self.interval) > 0.0) else None),
+                    "sensors": self.sample_msg.get("sensors", ["temperature", "humidity", "moisture"]),
+                    "services": self.sample_msg.get("services", ["diagnostics", "ota"]),
+                    # Start unsubscribed to match protocol: hub must subscribe to enable sends
+                    "subscribed": False,
+                }
                 task = asyncio.create_task(
-                    simulate_node(self.uri, node_id, self.interval, self.sample_msg, control_event, self.log_enabled, disconnect_event, send_event, event_queue, event_trigger)
+                    simulate_node(self.uri, node_id, self.interval, self.sample_msg, control_event, self.log_enabled, disconnect_event, send_event, cfg, event_queue)
                 )
-                self.node_tasks[node_id] = (task, control_event, disconnect_event, send_event, event_queue, event_trigger)
+                self.node_tasks[node_id] = (task, control_event, disconnect_event, send_event, cfg, event_queue)
                 print(f"Node {node_id} added and started.")
 
     async def remove_node(self, *node_ids):
@@ -704,7 +482,7 @@ class NodeManager:
                 if node_id not in self.node_tasks:
                     print(f"Node {node_id} does not exist.")
                     continue
-                task, _, disconnect_event, _, _ = self.node_tasks.pop(node_id)
+                task, _, disconnect_event, _, _, _ = self.node_tasks.pop(node_id)
                 disconnect_event.set()  # signal node to disconnect
                 to_remove.append((node_id, task))
 
@@ -744,7 +522,7 @@ class NodeManager:
     async def list_nodes(self):
         async with self.lock:
             print("Active nodes:")
-            for node_id, (task, control_event, _, _, _, _) in self.node_tasks.items():
+            for node_id, (task, control_event, _, _, _cfg, _evtq) in self.node_tasks.items():
                 status = "active" if control_event.is_set() else "paused"
                 print(f"  Node {node_id}: {status}")
 
@@ -754,7 +532,7 @@ class NodeManager:
                 if node_id not in self.node_tasks:
                     print(f"Node {node_id} does not exist.")
                     continue
-                task, control_event, _, _, _, _ = self.node_tasks[node_id]
+                task, control_event, _, _, _cfg, _evtq = self.node_tasks[node_id]
                 status = "active" if control_event.is_set() else "paused"
                 print(f"Node {node_id} status: {status}, task done: {task.done()}")
 
@@ -765,14 +543,9 @@ class NodeManager:
             tasks = list(self.node_tasks.items())
             self.node_tasks.clear()
 
-        # Signal all nodes to disconnect
         for node_id, (task, _, disconnect_event, _, _, _) in tasks:
-            try:
-                disconnect_event.set()
-            except Exception:
-                pass
+            disconnect_event.set()
 
-        # Await task completion (outside the lock is fine since we've cleared the registry)
         for node_id, (task, _, _, _, _, _) in tasks:
             try:
                 await asyncio.wait_for(task, timeout=2.0)
@@ -782,9 +555,6 @@ class NodeManager:
                     await task
                 except asyncio.CancelledError:
                     pass
-            except Exception:
-                # Swallow any other errors during shutdown
-                pass
         print("All nodes removed.")
 
     async def send_data(self, node_id: int):
@@ -792,7 +562,7 @@ class NodeManager:
             if node_id not in self.node_tasks:
                 print(f"Node {node_id} does not exist.")
                 return
-            task, control_event, disconnect_event, send_event, event_queue, event_trigger = self.node_tasks[node_id]
+            task, control_event, disconnect_event, send_event, _cfg, _evtq = self.node_tasks[node_id]
             if not control_event.is_set():
                 print(f"Node {node_id} is paused/inactive. Resume it before sending.")
                 return
@@ -802,121 +572,40 @@ class NodeManager:
             send_event.set()
             print(f"Triggered one-shot send for node {node_id}.")
 
-    async def queue_event(self, node_id: int, event_msg: dict):
-        """Queue a pre-built event message for a node to send as soon as possible.
-
-        The event_msg should already be a fully-formed JSON-serializable dict (e.g., from
-        build_event_message())."""
+    async def event_node(self, node_id: int, event_type: str, message: str = None, fields: dict = None):
+        """Enqueue a sporadic event for a node. Event will be sent immediately by simulate_node."""
         async with self.lock:
             if node_id not in self.node_tasks:
                 print(f"Node {node_id} does not exist.")
                 return
-            _, control_event, disconnect_event, _, event_queue, _ = self.node_tasks[node_id]
-            if disconnect_event.is_set():
-                print(f"Node {node_id} is disconnected; cannot queue event.")
+            task, control_event, disconnect_event, send_event, cfg, event_queue = self.node_tasks[node_id]
+            if disconnect_event.is_set() or task.done():
+                print(f"Node {node_id} is disconnected.")
                 return
-            await event_queue.put(event_msg)
-            # Signal event_trigger (stored as the 6th tuple element) so the node will send immediately
-            try:
-                node_tuple = self.node_tasks.get(node_id)
-                if node_tuple is not None and len(node_tuple) >= 6 and node_tuple[5] is not None:
-                    node_tuple[5].set()
-            except Exception:
-                pass
-            print(f"Queued event for node {node_id}.")
-
-    async def queue_door_event(self, node_id: int, door_states):
-        # Build event payload with door_state_0..door_state_{DOOR_COUNT-1} keys.
-        # Accept door_states as list of states (strings like 'OPEN'/'CLOSE' or numeric values).
-        async with self.lock:
-            if node_id not in self.node_tasks:
-                print(f"Node {node_id} does not exist.")
+            # Gate events by subscription: do not enqueue/send events while
+            # the node is unsubscribed per protocol behavior.
+            if not cfg.get("subscribed"):
+                print(f"Node {node_id} is not subscribed; event discarded.")
                 return
-            task, control_event, disconnect_event, send_event, event_queue, event_trigger = self.node_tasks[node_id]
-            if disconnect_event.is_set():
-                print(f"Node {node_id} is disconnected; cannot queue event.")
-                return
-
-            payload = {}
-            for i in range(DOOR_COUNT):
-                key = f"doorsense_{i}"
-                if i < len(door_states):
-                    v = door_states[i]
-                    # Normalize common string inputs
-                    if isinstance(v, str):
-                        vs = v.strip().upper()
-                        if vs in ("OPEN", "OPEN\r", "OPEN\n"):
-                            payload[key] = "OPEN"
-                        elif vs in ("CLOSE", "CLOSED", "CLOSE\r"):
-                            payload[key] = "CLOSE"
-                        else:
-                            # leave as provided (hub will normalize or interpret)
-                            payload[key] = v
-                    else:
-                        # numeric value
-                        payload[key] = int(v)
-                else:
-                    # Not provided → leave absent (hub treats missing as unknown)
-                    # but put explicit "UNKNOWN" for clarity
-                    payload[key] = "UNKNOWN"
-
-            ev = build_event_message(node_id, 0, MSG_EVENT_DOOR, payload)
-            await event_queue.put(ev)
-            # Signal the node that an event is available so it can be sent immediately
-            try:
-                # our stored tuple didn't include the trigger previously; try to set it if present
-                node_tuple = self.node_tasks.get(node_id)
-                if node_tuple is not None and len(node_tuple) >= 6:
-                    # new layout: (task, control_event, disconnect_event, send_event, event_queue, event_trigger)
-                    node_tuple[5].set()
-            except Exception:
-                pass
-            print(f"Queued door event for node {node_id} (door count {DOOR_COUNT}).")
-
-    async def queue_service_event(self, node_id: int, service_name: str, **kwargs):
-        desc = build_service_event_descriptor(service_name, **kwargs)
-        async with self.lock:
-            if node_id not in self.node_tasks:
-                print(f"Node {node_id} does not exist.")
-                return
-            ev = build_event_message(node_id, 0, MSG_EVENT_SERVICE, desc)
-            _, _, disconnect_event, _, event_queue, _ = self.node_tasks[node_id]
-            if disconnect_event.is_set():
-                print(f"Node {node_id} is disconnected; cannot queue service event.")
-                return
-            await event_queue.put(ev)
-            try:
-                node_tuple = self.node_tasks.get(node_id)
-                if node_tuple is not None and len(node_tuple) >= 6:
-                    node_tuple[5].set()
-            except Exception:
-                pass
-            print(f"Queued service event '{service_name}' for node {node_id}.")
+            payload = {"event_type": event_type}
+            if message:
+                payload["message"] = message
+            if fields and isinstance(fields, dict):
+                payload.update(fields)
+            await event_queue.put(payload)
+            print(f"Enqueued event for node {node_id}: {event_type}")
 
 
 async def cli_loop(node_manager, log_enabled):
-    print("\nCommands: add <id> [<id>...], remove <id> [<id>...], pause <id> [<id>...], resume <id> [<id>...], status <id> [<id>...], list, sd <id> [<id>...], ev <id> door <state> [<state>...], sev <id> <service> [key=value ...], wipe, exit, done")
+    print("\nCommands: add <id> [<id>...], remove <id> [<id>...], pause <id> [<id>...], resume <id> [<id>...], status <id> [<id>...], list, sd <id> [<id>...], wipe, exit, done")
     print("<id>: Node ID(s) to be managed (space-separated)")
     print("list: List all nodes and their status")
     print("wipe: Remove all nodes")    
     print("done: Resume log printing")
     print("exit: Exit the tester completely")
     loop = asyncio.get_event_loop()
-    session = None
-    if _HAS_PROMPT_TOOLKIT:
-        style = Style.from_dict({'prompt': 'ansicyan bold'})
-        session = PromptSession('> ', history=InMemoryHistory(), style=style)
-
     while True:
-        if session is not None:
-            # prompt_toolkit async prompt
-            try:
-                cmdline = await session.prompt_async()
-            except (EOFError, KeyboardInterrupt):
-                cmdline = ''
-        else:
-            cmdline = await loop.run_in_executor(None, sys.stdin.readline)
-        cmd = cmdline
+        cmd = await loop.run_in_executor(None, sys.stdin.readline)
         if not cmd:
             continue
         cmd = cmd.strip().split()
@@ -951,49 +640,52 @@ async def cli_loop(node_manager, log_enabled):
                 # Trigger one-shot send for each provided ID
                 for nid in node_ids:
                     await node_manager.send_data(nid)
+        elif action == "ev" and len(cmd) >= 3:
+            # ev <id> <type> [args...]
+            # Supported shorthand for door events:
+            #   ev <id> DOOR <idx> <OPEN|CLOSE> [<idx> <OPEN|CLOSE> ...]
+            try:
+                nid = int(cmd[1])
+            except ValueError:
+                print("Invalid node ID")
+                continue
+            etok = cmd[2].upper()
+            # Map shorthand to protocol event_type
+            if etok in ("DOOR", "EVENT_DOOR"):
+                event_type = "EVENT_DOOR"
+                args = cmd[3:]
+                if len(args) == 0 or (len(args) % 2) != 0:
+                    print("Usage: ev <id> DOOR <idx> <OPEN|CLOSE> [<idx> <OPEN|CLOSE> ...]")
+                    continue
+                fields = {}
+                ok = True
+                for i in range(0, len(args), 2):
+                    try:
+                        idx = int(args[i])
+                    except ValueError:
+                        print(f"Invalid index: {args[i]}")
+                        ok = False
+                        break
+                    state = args[i+1].upper()
+                    if state in ("OPEN", "1", "TRUE", "ON"):
+                        sval = "OPEN"
+                    elif state in ("CLOSE", "CLOSED", "0", "FALSE", "OFF"):
+                        sval = "CLOSED"
+                    else:
+                        print(f"Invalid state: {args[i+1]} (expected OPEN/CLOSE)")
+                        ok = False
+                        break
+                    fields[f"doorsense_{idx}"] = sval
+                if not ok:
+                    continue
+                await node_manager.event_node(nid, event_type, fields=fields)
+            else:
+                # Generic event: treat remainder as free-form message
+                event_type = cmd[2]
+                ev_msg = ' '.join(cmd[3:]) if len(cmd) > 3 else None
+                await node_manager.event_node(nid, event_type, ev_msg)
         elif action == "list":
             await node_manager.list_nodes()
-        elif action == "ev":
-            # ev <node_id> door <state> [<state>...]
-            if len(cmd) < 2:
-                print("Incomplete ev command. Usage: ev <node_id> door <state> [<state>...]")
-                continue
-            try:
-                node_id = int(cmd[1])
-            except ValueError:
-                print("Invalid node id for ev command")
-                continue
-            # Check if node exists first and provide a helpful error
-            async with node_manager.lock:
-                if node_id not in node_manager.node_tasks:
-                    print(f"Node {node_id} does not exist.")
-                    continue
-            if len(cmd) < 3:
-                print("Incomplete ev command. Usage: ev <node_id> door <state> [<state>...]")
-                continue
-            if cmd[2].lower() != 'door':
-                print("Only 'door' kind supported for ev. Use 'sev' for service events.")
-                continue
-            # Require at least one explicit door state to avoid accidental empty events
-            if len(cmd) < 4:
-                print("Incomplete ev command: please provide at least one door state (e.g., 'open' or 'close').")
-                continue
-            door_states = cmd[3:]
-            await node_manager.queue_door_event(node_id, door_states)
-        elif action == "sev" and len(cmd) >= 3:
-            # sev <node_id> <service> [key=value ...]
-            try:
-                node_id = int(cmd[1])
-            except ValueError:
-                print("Invalid node id for sev command")
-                continue
-            service_name = cmd[2]
-            kv = {}
-            for pair in cmd[3:]:
-                if '=' in pair:
-                    k, v = pair.split('=', 1)
-                    kv[k] = v
-            await node_manager.queue_service_event(node_id, service_name, **kv)
         elif action == "wipe":
             await node_manager.shutdown()
             break
@@ -1010,17 +702,18 @@ async def cli_loop(node_manager, log_enabled):
         else:
             print("Unknown command.")
 
-async def main(uri, num_nodes, interval):
+async def main(uri, num_nodes, interval, sensors_override=None, services_override=None):
     # Load the sample message as a template
     with open(SAMPLE_MSG_PATH, "r") as f:
         sample_msg = json.load(f)
+    # Apply any runtime overrides for advertised sensors/services
+    if sensors_override:
+        sample_msg["sensors"] = sensors_override
+    if services_override:
+        sample_msg["services"] = services_override
     log_enabled = asyncio.Event()
     log_enabled.set()
     node_manager = NodeManager(uri, interval, sample_msg, log_enabled)
-    LOGGER.set_enabled_event(log_enabled)
-    # Spinner control
-    spinner_stop = asyncio.Event()
-    spinner = asyncio.create_task(_spinner_task(spinner_stop))
     # Start initial nodes
     for i in range(num_nodes):
         await node_manager.add_node(i)
@@ -1029,50 +722,65 @@ async def main(uri, num_nodes, interval):
     await node_manager.start_janitor()
 
     loop = asyncio.get_event_loop()
-    while True:
-        # Wait for 'cmd' or 'exit' from user
-        cmd = await loop.run_in_executor(None, sys.stdin.readline)
-        if not cmd:
-            continue
-        if cmd.strip().lower() == 'exit':
-            print("Exiting the tester.")
-            spinner_stop.set()
-            try:
-                await asyncio.wait_for(spinner, timeout=1.0)
-            except asyncio.TimeoutError:
-                spinner.cancel()
+    try:
+        while True:
+            # Wait for 'cmd' or 'exit' from user
+            # If a global stop has been requested (SIGINT), shutdown and exit
+            if STOP_EVENT.is_set():
+                print("\nSIGINT received — shutting down from main loop...")
+                try:
+                    await node_manager.shutdown()
+                except Exception:
+                    pass
+                return
+            cmd = await loop.run_in_executor(None, sys.stdin.readline)
+            if not cmd:
+                continue
+            if cmd.strip().lower() == 'exit':
+                print("Exiting the tester.")
+                await node_manager.shutdown()
+                break
+            if cmd.strip().lower() == 'cmd':
+                log_enabled.clear()
+                print("\n--- Command mode: log printing paused. Type commands, or 'done' to resume logs. ---")
+                await cli_loop(node_manager, log_enabled)
+                print("--- Log printing resumed. Type 'cmd' to enter command mode again, or 'exit' to fully quit. ---\n")
+            elif cmd.strip().lower() == 'quit':
+                await node_manager.shutdown()
+                break
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Graceful shutdown on Ctrl-C or cancellation
+        print("\nKeyboard interrupt received — shutting down nodes...")
+        try:
             await node_manager.shutdown()
-            break
-        if cmd.strip().lower() == 'cmd':
-            log_enabled.clear()
-            print("\n--- Command mode: log printing paused. Type commands, or 'done' to resume logs. ---")
-            await cli_loop(node_manager, log_enabled)
-            print("--- Log printing resumed. Type 'cmd' to enter command mode again, or 'exit' to fully quit. ---\n")
-        elif cmd.strip().lower() == 'quit':
-            spinner_stop.set()
-            try:
-                await asyncio.wait_for(spinner, timeout=1.0)
-            except asyncio.TimeoutError:
-                spinner.cancel()
-            await node_manager.shutdown()
-            break
+        except Exception:
+            pass
+        return
 
 if __name__ == "__main__":
-    print("NodeIO Protocol Tester")
+    # Special-case the literal 'help' positional for convenience: many users
+    # run `python testnode.py help` expecting usage. argparse doesn't treat the
+    # word 'help' as a flag, so handle it explicitly before parsing.
+    if len(sys.argv) >= 2 and sys.argv[1].lower() == 'help':
+        parser = argparse.ArgumentParser(description="NodeIO Protocol Tester")
+        parser.print_help()
+        sys.exit(0)
 
-    if len(sys.argv) < 2:
-        print("Usage: python testnode.py ws://<host>/ws [num_nodes] [interval_sec]")
-        print("- If interval_sec is 0 or omitted, nodes do NOT send periodically; use 'sd <id>' in CLI mode to send once.")
-        print("Example periodic: python testnode.py ws://192.168.68.108/ws 3 2     # 3 nodes, 2s interval")
-        print("Example manual:   python testnode.py ws://192.168.68.108/ws 2       # 2 nodes, manual send")
-        sys.exit(1)
+    # Use argparse so we can accept optional --sensors/--services overrides
+    parser = argparse.ArgumentParser(description="NodeIO Protocol Tester")
+    parser.add_argument("uri", help="WebSocket URI of hub, e.g. ws://<host>/ws")
+    parser.add_argument("num_nodes", nargs="?", type=int, default=1, help="Number of nodes to simulate (default: 1)")
+    parser.add_argument("interval", nargs="?", type=float, default=0.0, help="Send interval in seconds (0 => manual mode)")
+    parser.add_argument("--sensors", help="Comma-separated list of sensors to advertise (overrides sample_msg)")
+    parser.add_argument("--services", help="Comma-separated list of services to advertise (overrides sample_msg)")
+    args = parser.parse_args()
 
-    print("Type 'cmd' and press Enter to enter command mode at any time.")
-    uri = sys.argv[1]
-    # Args: [num_nodes] [interval_sec]; if interval omitted → manual mode
-    num_nodes = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-    interval = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0
-    # If user provided ws://host/ws (no port), default to port 80
+    uri = args.uri
+    num_nodes = args.num_nodes
+    interval = args.interval
+    sensors = [s.strip() for s in args.sensors.split(",")] if args.sensors else None
+    services = [s.strip() for s in args.services.split(",")] if args.services else None
+    # Normalize URI: ensure path and port defaulting like before
     from urllib.parse import urlparse
     parsed = urlparse(uri)
     if parsed.scheme.startswith('ws'):
@@ -1082,4 +790,19 @@ if __name__ == "__main__":
         if path in ('', '/'):
             path = '/ws'
         uri = f"{parsed.scheme}://{host}:{port}{path}"
-    asyncio.run(main(uri, num_nodes, interval))
+
+    # Register SIGINT handler for interactive shells to set STOP_EVENT so
+    # running tasks can observe and begin graceful shutdown immediately.
+    try:
+        signal.signal(signal.SIGINT, lambda s, f: STOP_EVENT.set())
+    except Exception:
+        # Not critical; continue without signal handler if unsupported
+        pass
+
+    try:
+        asyncio.run(main(uri, num_nodes, interval, sensors_override=sensors, services_override=services))
+    except KeyboardInterrupt:
+        # Fallback: if asyncio.run raises KeyboardInterrupt, ensure exit
+        print("Interrupted by user. Exiting.")
+        sys.exit(0)
+    

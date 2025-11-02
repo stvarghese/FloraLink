@@ -59,7 +59,8 @@
 			"esp_sleep.h": "c",
 			"webserver.h": "c",
 			"rmt_rx.h": "c",
-			"nodeio_lut.h": "c"
+			"nodeio_lut.h": "c",
+			"ledc.h": "c"
 		},
 		"powershell.cwd": "FloraLink"
 	}

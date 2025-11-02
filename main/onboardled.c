@@ -76,6 +76,9 @@
 #include "onboardled.h"
 #include "driver/gpio.h"
 #include "led_strip.h"
+#ifndef CONFIG_BLINK_LED_STRIP
+#include "driver/ledc.h"
+#endif
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -109,6 +112,8 @@ static onboardled_color_t s_current_color = {255, 255, 255}; // Default white
 // Handle for addressable LED strip
 static led_strip_handle_t led_strip = NULL;
 static bool s_strip_initialized = false;
+// Timer used to perform a delayed second refresh to combat residual glow
+static esp_timer_handle_t s_double_refresh_timer = NULL;
 #endif
 
 // Non-blocking pattern state machine
@@ -182,10 +187,50 @@ typedef struct
 
 static pattern_context_t s_pattern_ctx = {0};
 
+// PWM (LEDC) state for single-GPIO LEDs (non-strip)
+#ifndef CONFIG_BLINK_LED_STRIP
+static bool s_ledc_initialized = false;
+#endif
+
 // Forward declarations for timer callbacks
 static void pattern_timer_callback(void *arg);
 static inline void onboardled_write(bool on);
 static inline void onboardled_write_color(bool on, onboardled_color_t color);
+
+#ifdef CONFIG_BLINK_LED_STRIP
+/**
+ * @brief One-shot esp_timer callback to perform a delayed second refresh of the
+ * LED strip after a clear. Runs in the esp-timer task context.
+ */
+static void led_double_refresh_cb(void *arg)
+{
+    (void)arg;
+    if (s_strip_initialized && led_strip)
+    {
+        /* Perform two refreshes spaced by a short delay to improve latching
+         * behavior on problematic strips. Doing both refreshes inside this
+         * callback avoids scheduling additional timers. */
+        esp_err_t rc2 = led_strip_refresh(led_strip);
+        if (rc2 != ESP_OK)
+        {
+            ESP_LOGW(TAG, "led_strip_refresh (delayed 1) failed: %d", rc2);
+        }
+
+        /* Small spacing (5 ms) between refreshes */
+        esp_rom_delay_us(5000);
+
+        esp_err_t rc3 = led_strip_refresh(led_strip);
+        if (rc3 != ESP_OK)
+        {
+            ESP_LOGW(TAG, "led_strip_refresh (delayed 2) failed: %d", rc3);
+        }
+        else if (rc2 == ESP_OK)
+        {
+            ESP_LOGD(TAG, "led_strip: delayed double-refresh completed");
+        }
+    }
+}
+#endif
 
 /**
  * @brief Timer callback for pattern state machine
@@ -346,19 +391,17 @@ static void pattern_timer_callback(void *arg)
         switch (s_pattern_ctx.state)
         {
         case PATTERN_STATE_FADE_IN:
-            // Calculate interpolated brightness: 0 to BRLEVEL over breathing_steps
-            s_pattern_ctx.current_brightness = (s_pattern_ctx.current_step * BRLEVEL) / s_pattern_ctx.breathing_steps;
+        {
+            // Compute fractional progress [0.0 .. 1.0]
+            float frac = (float)s_pattern_ctx.current_step / (float)s_pattern_ctx.breathing_steps;
 
-            // Scale the configured color by current brightness (preserve hue)
-            {
-                uint8_t br = s_pattern_ctx.current_brightness;
-                // scale and round to nearest integer
-                currstepbrightness.r = (uint8_t)((s_pattern_ctx.color.r * br + (BRLEVEL / 2)) / BRLEVEL);
-                currstepbrightness.g = (uint8_t)((s_pattern_ctx.color.g * br + (BRLEVEL / 2)) / BRLEVEL);
-                currstepbrightness.b = (uint8_t)((s_pattern_ctx.color.b * br + (BRLEVEL / 2)) / BRLEVEL);
-            }
+            // Interpolate color in the 0..BRLEVEL space (BRLEVEL is the hardware max)
+            currstepbrightness.r = (uint8_t)((float)s_pattern_ctx.color.r * frac + 0.5f);
+            currstepbrightness.g = (uint8_t)((float)s_pattern_ctx.color.g * frac + 0.5f);
+            currstepbrightness.b = (uint8_t)((float)s_pattern_ctx.color.b * frac + 0.5f);
 
-            if (s_pattern_ctx.current_brightness > 0)
+            // Write (if any channel > 0, treat as on)
+            if (currstepbrightness.r || currstepbrightness.g || currstepbrightness.b)
             {
                 onboardled_write_color(true, currstepbrightness);
             }
@@ -375,26 +418,23 @@ static void pattern_timer_callback(void *arg)
                 // Fade in complete, switch to fade out
                 s_pattern_ctx.state = PATTERN_STATE_FADE_OUT;
                 s_pattern_ctx.current_step = s_pattern_ctx.breathing_steps; // Start fade out from max
-                s_pattern_ctx.current_brightness = BRLEVEL;
             }
 
             next_delay_ms = s_pattern_ctx.breathing_step_ms;
-            break;
+        }
+        break;
 
         case PATTERN_STATE_FADE_OUT:
-            // Calculate interpolated brightness: BRLEVEL to 0 over breathing_steps
-            s_pattern_ctx.current_brightness = (s_pattern_ctx.current_step * BRLEVEL) / s_pattern_ctx.breathing_steps;
+        {
+            // Compute fractional progress [0.0 .. 1.0] where 1.0 -> full brightness, 0.0 -> off
+            float frac = (float)s_pattern_ctx.current_step / (float)s_pattern_ctx.breathing_steps;
 
-            // Scale the configured color by current brightness (preserve hue)
-            {
-                // scale and round to nearest integer
-                uint8_t br = s_pattern_ctx.current_brightness;
-                currstepbrightness.r = (uint8_t)((s_pattern_ctx.color.r * br + (BRLEVEL / 2)) / BRLEVEL);
-                currstepbrightness.g = (uint8_t)((s_pattern_ctx.color.g * br + (BRLEVEL / 2)) / BRLEVEL);
-                currstepbrightness.b = (uint8_t)((s_pattern_ctx.color.b * br + (BRLEVEL / 2)) / BRLEVEL);
-            }
+            // Interpolate color in the 0..BRLEVEL space (BRLEVEL is the hardware max)
+            currstepbrightness.r = (uint8_t)((float)s_pattern_ctx.color.r * frac + 0.5f);
+            currstepbrightness.g = (uint8_t)((float)s_pattern_ctx.color.g * frac + 0.5f);
+            currstepbrightness.b = (uint8_t)((float)s_pattern_ctx.color.b * frac + 0.5f);
 
-            if (s_pattern_ctx.current_brightness > 0)
+            if (currstepbrightness.r || currstepbrightness.g || currstepbrightness.b)
             {
                 onboardled_write_color(true, currstepbrightness);
             }
@@ -404,15 +444,22 @@ static void pattern_timer_callback(void *arg)
             }
 
             // Decrement step
-            s_pattern_ctx.current_step--;
+            if (s_pattern_ctx.current_step > 0)
+                s_pattern_ctx.current_step--;
 
             if (s_pattern_ctx.current_step == 0)
             {
-                // Fade out complete
-                s_pattern_ctx.current_brightness = 0;
+                // Fade out complete: immediately ensure LEDs are off, then
+                // enter PAUSE and schedule the configured pause duration.
+                // Clearing now prevents the small residual-step glow seen when
+                // the clear is deferred until the PAUSE handler.
+                onboardled_write_color(false, s_pattern_ctx.color);
+
                 if (s_pattern_ctx.pause_ms > 0)
                 {
                     s_pattern_ctx.state = PATTERN_STATE_PAUSE;
+                    /* Count this completed cycle now */
+                    s_pattern_ctx.current_count++;
                     next_delay_ms = s_pattern_ctx.pause_ms;
                 }
                 else
@@ -435,14 +482,16 @@ static void pattern_timer_callback(void *arg)
             {
                 next_delay_ms = s_pattern_ctx.breathing_step_ms;
             }
-            break;
+        }
+        break;
 
         case PATTERN_STATE_PAUSE:
-            // Stay off during pause
-            onboardled_write_color(false, s_pattern_ctx.color);
+            // Pause: we've previously cleared the LEDs when fade-out finished.
+            // This callback is invoked after the configured pause_ms; start the
+            // next fade-in step (or complete) without re-clearing or re-scheduling
+            // the pause.
+            ESP_LOGI(TAG, "Entering PAUSE state: pausing %lu ms (LED already cleared)", s_pattern_ctx.pause_ms);
 
-            // After pause, start next cycle or complete
-            s_pattern_ctx.current_count++;
             if (s_pattern_ctx.count == 0 || s_pattern_ctx.current_count < s_pattern_ctx.count)
             {
                 s_pattern_ctx.state = PATTERN_STATE_FADE_IN;
@@ -677,21 +726,159 @@ static inline void onboardled_write_color(bool on, onboardled_color_t color)
 #ifdef CONFIG_BLINK_LED_STRIP
     if (s_strip_initialized && led_strip != NULL)
     {
+        /* Enforce contract: color components are interpreted as 0..BRLEVEL.
+         * If callers passed values > BRLEVEL, clamp and warn. Use the
+         * clamped values for hardware operations. */
+        uint8_t cr = color.r;
+        uint8_t cg = color.g;
+        uint8_t cb = color.b;
+        bool clamped = false;
+        if (cr > BRLEVEL)
+        {
+            cr = BRLEVEL;
+            clamped = true;
+        }
+        if (cg > BRLEVEL)
+        {
+            cg = BRLEVEL;
+            clamped = true;
+        }
+        if (cb > BRLEVEL)
+        {
+            cb = BRLEVEL;
+            clamped = true;
+        }
+        if (clamped)
+        {
+            ESP_LOGW(TAG, "color components exceeded BRLEVEL (%u); clamping to %u", BRLEVEL, BRLEVEL);
+        }
+
         if (on)
         {
-            // Set pixel to the specified RGB color
-            led_strip_set_pixel(led_strip, 0, color.r, color.g, color.b);
-            led_strip_refresh(led_strip);
+            // Set pixel to the specified (clamped) RGB color and refresh the strip
+            esp_err_t rc = led_strip_set_pixel(led_strip, 0, cr, cg, cb);
+            if (rc != ESP_OK)
+            {
+                ESP_LOGW(TAG, "led_strip_set_pixel failed: %d", rc);
+            }
+            rc = led_strip_refresh(led_strip);
+            if (rc != ESP_OK)
+            {
+                ESP_LOGW(TAG, "led_strip_refresh (on) failed: %d", rc);
+            }
+            ESP_LOGI(TAG, "LED set to R=%u G=%u B=%u (clamped=%s)", cr, cg, cb, clamped ? "true" : "false");
         }
         else
         {
-            led_strip_clear(led_strip);
+            // Explicitly write zero to pixel 0 and perform refreshes (see double-refresh timer)
+            esp_err_t rc = led_strip_set_pixel(led_strip, 0, 0, 0, 0);
+            if (rc != ESP_OK)
+            {
+                ESP_LOGW(TAG, "led_strip_set_pixel (clear) failed: %d", rc);
+            }
+            rc = led_strip_refresh(led_strip);
+            if (rc != ESP_OK)
+            {
+                ESP_LOGW(TAG, "led_strip_refresh (clear) failed: %d", rc);
+            }
+
+            /* Schedule a second double-refresh via esp_timer; if timer creation
+             * is not yet performed, create it. The callback will perform two
+             * additional refreshes spaced ~5 ms apart. */
+            if (s_double_refresh_timer == NULL)
+            {
+                esp_timer_create_args_t targs = {
+                    .callback = led_double_refresh_cb,
+                    .arg = NULL,
+                    .dispatch_method = ESP_TIMER_TASK,
+                    .name = "led_double_refresh",
+                };
+
+                if (esp_timer_create(&targs, &s_double_refresh_timer) != ESP_OK)
+                {
+                    s_double_refresh_timer = NULL;
+                }
+            }
+
+            if (s_double_refresh_timer)
+            {
+                /* Ensure the latest clear wins: stop any pending one-shot and restart.
+                 * This prevents esp_timer_start_once returning ESP_ERR_INVALID_STATE
+                 * if the timer is already armed. */
+                if (esp_timer_is_active(s_double_refresh_timer))
+                {
+                    esp_err_t sret = esp_timer_stop(s_double_refresh_timer);
+                    if (sret != ESP_OK && sret != ESP_ERR_INVALID_STATE)
+                    {
+                        ESP_LOGW(TAG, "failed to stop active double-refresh timer: %s", esp_err_to_name(sret));
+                    }
+                }
+
+                esp_err_t tret = esp_timer_start_once(s_double_refresh_timer, 10000);
+                if (tret != ESP_OK)
+                {
+                    ESP_LOGW(TAG, "failed to start double-refresh timer: %s", esp_err_to_name(tret));
+                    /* fallback to immediate extra refreshes */
+                    rc = led_strip_refresh(led_strip);
+                    if (rc != ESP_OK)
+                    {
+                        ESP_LOGW(TAG, "led_strip_refresh (clear 2 fallback) failed: %d", rc);
+                    }
+                    rc = led_strip_refresh(led_strip);
+                    if (rc != ESP_OK)
+                    {
+                        ESP_LOGW(TAG, "led_strip_refresh (clear 3 fallback) failed: %d", rc);
+                    }
+                }
+            }
+
+            ESP_LOGI(TAG, "LED cleared (off)");
         }
     }
 #else
-    // For GPIO LED, handle active low/high logic (color ignored for simple GPIO)
-    bool gpio_level = s_active_low ? !on : on;
-    gpio_set_level(s_pin, gpio_level ? 1 : 0);
+    // For GPIO LED, try to use LEDC PWM if available; otherwise fall back to simple GPIO level
+    if (s_ledc_initialized)
+    {
+        /* Enforce contract: interpret color components as 0..BRLEVEL. Clamp if necessary. */
+        uint32_t eff_r = color.r;
+        uint32_t eff_g = color.g;
+        uint32_t eff_b = color.b;
+        if (eff_r > BRLEVEL)
+            eff_r = BRLEVEL;
+        if (eff_g > BRLEVEL)
+            eff_g = BRLEVEL;
+        if (eff_b > BRLEVEL)
+            eff_b = BRLEVEL;
+
+        /* Compute perceived brightness as maximum of channels (0..BRLEVEL) */
+        uint32_t brightness_level = eff_r;
+        if (eff_g > brightness_level)
+            brightness_level = eff_g;
+        if (eff_b > brightness_level)
+            brightness_level = eff_b;
+
+        /* Map brightness_level (0..BRLEVEL) into LEDC duty (0..max_duty) */
+        uint32_t max_duty = ((1 << LEDC_TIMER_8_BIT) - 1);
+        uint32_t duty = 0;
+        if (BRLEVEL > 0)
+        {
+            duty = (brightness_level * max_duty) / BRLEVEL;
+        }
+
+        if (!on)
+        {
+            duty = 0;
+        }
+
+        ESP_ERROR_CHECK(ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, duty));
+        ESP_ERROR_CHECK(ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0));
+    }
+    else
+    {
+        // Fallback to simple GPIO on/off if PWM not configured
+        bool gpio_level = s_active_low ? !on : on;
+        gpio_set_level(s_pin, gpio_level ? 1 : 0);
+    }
 #endif
 }
 
@@ -725,12 +912,47 @@ void onboardled_begin(uint8_t pin, bool active_low)
 #error "unsupported LED strip backend"
 #endif
         led_strip_clear(led_strip);
+        /* Ensure physical LEDs are updated after clearing the buffer */
+        led_strip_refresh(led_strip);
         s_strip_initialized = true;
+    }
+    else
+    {
+        led_strip_clear(led_strip);
+        /* Make sure the clear takes effect on the strip hardware */
+        led_strip_refresh(led_strip);
     }
 #else
     // Configure GPIO for simple LED
     gpio_reset_pin(s_pin);
     gpio_set_direction(s_pin, GPIO_MODE_OUTPUT);
+
+    // Try to initialize LEDC PWM on this pin for smoother brightness control
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode = LEDC_HIGH_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_8_BIT,
+        .timer_num = LEDC_TIMER_0,
+        .freq_hz = 500,
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+
+    if (ledc_timer_config(&ledc_timer) == ESP_OK)
+    {
+        ledc_channel_config_t ledc_channel_cfg = {
+            .gpio_num = s_pin,
+            .speed_mode = LEDC_HIGH_SPEED_MODE,
+            .channel = LEDC_CHANNEL_0,
+            .intr_type = LEDC_INTR_DISABLE,
+            .timer_sel = LEDC_TIMER_0,
+            .duty = 0,
+            .hpoint = 0,
+        };
+
+        if (ledc_channel_config(&ledc_channel_cfg) == ESP_OK)
+        {
+            s_ledc_initialized = true;
+        }
+    }
 #endif
 
     // Default to off
@@ -885,6 +1107,17 @@ bool onboardled_start_breathing(uint32_t fade_in_ms, uint32_t fade_out_ms, uint3
     s_pattern_ctx.state = PATTERN_STATE_FADE_IN;
     s_pattern_ctx.count = cycles;
     s_pattern_ctx.current_count = 0;
+    // Enforce color contract: clamp to BRLEVEL if caller passed larger values
+    if (effective_color.r > BRLEVEL || effective_color.g > BRLEVEL || effective_color.b > BRLEVEL)
+    {
+        ESP_LOGW(TAG, "breathing color components exceed BRLEVEL (%u); clamping", BRLEVEL);
+        if (effective_color.r > BRLEVEL)
+            effective_color.r = BRLEVEL;
+        if (effective_color.g > BRLEVEL)
+            effective_color.g = BRLEVEL;
+        if (effective_color.b > BRLEVEL)
+            effective_color.b = BRLEVEL;
+    }
     s_pattern_ctx.color = effective_color;
 
     // Breathing-specific parameters
@@ -901,6 +1134,8 @@ bool onboardled_start_breathing(uint32_t fade_in_ms, uint32_t fade_out_ms, uint3
 
     // Start with minimum brightness (off)
     onboardled_write_color(false, (onboardled_color_t){0, 0, 0});
+
+    ESP_LOGI(TAG, "Breathing params: fade_in=%lums fade_out=%lums pause=%lums steps=%lu step_ms=%lu cycles=%lu", fade_in_ms, fade_out_ms, pause_ms, steps, step_ms, cycles);
 
     // Start the timer
     ESP_ERROR_CHECK(esp_timer_start_once(s_pattern_ctx.timer, s_pattern_ctx.breathing_step_ms * 1000));

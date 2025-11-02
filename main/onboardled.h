@@ -55,6 +55,11 @@ typedef struct
 } onboardled_color_t;
 
 // Control RGB brightness level (0-255)
+// NOTE: Color components passed to the API are interpreted as values in
+// the range 0..BRLEVEL. BRLEVEL is the hardware channel maximum that the
+// driver will send to LEDs (e.g. 10 means the driver will never send values
+// greater than 10 on the 8-bit channel). Values above BRLEVEL will be
+// clamped by the driver and a warning will be logged.
 #define ONBOARDLED_BRIGHTNESS_LEVEL 10
 #define ONBOARDLED_BRIGHTNESS_FULL 255
 

@@ -17,7 +17,7 @@
 // --- Maximum payload count ---
 #define PROTOCOL_MAX_PAYLOAD_COUNT 10
 
-#define NUM_DOOR_SENSORS 3
+#define NUM_DOOR_SENSORS 8
 
 // --- Capability bitmask ---
 typedef enum

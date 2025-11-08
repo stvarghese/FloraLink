@@ -55,13 +55,24 @@
 {
     "magic": 3203391147,
     "type": "node_event",
+    "node_id": 5,
+    "seq_num": 43,
+    "timestamp": 1693550010,
+    "payload": {
+        "event_type": "EVENT_DOOR",
+        "state": "OPEN"
+    }
+}
+
+{
+    "magic": 3203391147,
+    "type": "node_event",
     "node_id": 2,
     "seq_num": 43,
     "timestamp": 1693550010,
     "payload": {
         "event_type": "EVENT_DOOR",
-        "doorsense_1": "OPEN",
-        "doorsense_2": "CLOSED"
+        "doorsense_1": "OPEN"
     }
 }
 

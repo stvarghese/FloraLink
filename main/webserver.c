@@ -838,16 +838,16 @@ void webserver_health_monitor(void)
     void *transport_ctx = httpd_get_global_transport_ctx(server);
 
     // Log comprehensive health status
-    ESP_LOGI(TAG, "Server health check: OK");
-    ESP_LOGI(TAG, "  - Uptime: %llu ms", esp_timer_get_time() / 1000);
-    ESP_LOGI(TAG, "  - Active client connections: %zu", open_fds);
-    ESP_LOGI(TAG, "  - Global context: %s", global_ctx ? "set" : "null");
-    ESP_LOGI(TAG, "  - Transport context: %s", transport_ctx ? "set" : "null");
+    ESP_LOGD(TAG, "Server health check: OK");
+    ESP_LOGD(TAG, "  - Uptime: %llu ms", esp_timer_get_time() / 1000);
+    ESP_LOGD(TAG, "  - Active client connections: %zu", open_fds);
+    ESP_LOGD(TAG, "  - Global context: %s", global_ctx ? "set" : "null");
+    ESP_LOGD(TAG, "  - Transport context: %s", transport_ctx ? "set" : "null");
 
     // Get memory info
     size_t free_heap = esp_get_free_heap_size();
     size_t min_free_heap = esp_get_minimum_free_heap_size();
-    ESP_LOGI(TAG, "  - Free heap: %zu bytes (min: %zu bytes)", free_heap, min_free_heap);
+    ESP_LOGD(TAG, "  - Free heap: %zu bytes (min: %zu bytes)", free_heap, min_free_heap);
 
     // Quick health checks
     if (open_fds > 10) // Warn if too many open connections

@@ -1,15 +1,15 @@
 {
     "magic": 3203391147,
     "type": "notify_subscription",
-    "node_id": 1,
+    "node_id": 5,
     "seq_num": 42,
     "timestamp": 1725974400,
     "payload": {
         "status": "subscribed",
         "filter": {
             "sensors": [
-                "temperature",
-                "humidity"
+                "moisture",
+                "doorsense"
             ],
             "services": [
                 "diagnostics"
@@ -32,15 +32,15 @@
 
 {
     "type": "connect_response",
-    "node_id": 1,
-    "seq_num": 44,
+    "node_id": 5,
+    "seq_num": 1,
     "timestamp": 1725974402,
     "status": "accepted"
 }
 
 {
     "type": "error",
-    "node_id": 1,
+    "node_id": 5,
     "seq_num": 45,
     "timestamp": 1725974403,
     "payload": {
@@ -50,16 +50,8 @@
 }
 
 {
-    "magic": 3203391147,
-    "type": "heartbeat",
-    "node_id": 1,
-    "seq_num": 46,
-    "timestamp": 1725974404
-}
-
-{
     "type": "diagnostic_request",
-    "node_id": 1,
+    "node_id": 5,
     "seq_num": 47,
     "timestamp": 1725974405
 }

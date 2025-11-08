@@ -96,6 +96,21 @@ static uint32_t node_local_seq[MAX_NODES] = {0};
 // Door sensor ownership tracking: door_owner[door_index] = node_id (or -1 if unclaimed)
 static int8_t door_owner[NUM_DOOR_SENSORS] = {-1, -1, -1};
 
+// Simple node-to-global door mapping: each node has at most ONE door
+// node_door_map[node_id] = global_index (or -1 if node has no door assigned)
+static int8_t node_door_map[MAX_NODES];
+
+// Helper function to find next free global door slot
+static int find_next_free_door_slot(void)
+{
+    for (int i = 0; i < NUM_DOOR_SENSORS; i++)
+    {
+        if (door_owner[i] == -1)
+            return i;
+    }
+    return -1; // All slots taken
+}
+
 // Function declarations
 static inline msg_type_t nodeio_type_str_to_enum(const char *type_str);
 static inline esp_err_t nodeio_parse_message_payload(cJSON *root, capability_t node_cap_mask, protocol_msg_t *p_currentmsg);
@@ -450,139 +465,142 @@ static inline esp_err_t nodeio_parse_sporadic_event(protocol_msg_t *p_msg, cJSON
             return ESP_FAIL;
         }
 
-        /* Support two canonical shapes:
-           1) Canonical array form: { "doorsense": ["OPEN","CLOSED", ...] }
-           2) Legacy per-index keys: { "doorsense_0": "OPEN", "doorsense_1": "CLOSED", ... }
-           Prefer the canonical array when present; otherwise fall back to per-index keys.
+        /* Support two format options:
+           1) Single-door implicit: { "state": "OPEN" } - Simple, practical (one door per node)
+           2) Legacy per-index keys: { "doorsense_0": "OPEN" } - Backward compatibility
         */
 
-        int field_count = 0;
-        cJSON *doorsense_arr = cJSON_GetObjectItem(msg_payload, "doorsense");
-        cJSON *door_state_arr = NULL;
-        bool using_array = false;
+        // Check for single-door format first (preferred)
+        cJSON *state_item = cJSON_GetObjectItem(msg_payload, "state");
+        if (state_item && cJSON_IsString(state_item))
+        {
+            // Single-door format: one door per node
+            uint8_t val = 0xFF;
+            if (strcmp(state_item->valuestring, "OPEN") == 0)
+                val = 1;
+            else if (strcmp(state_item->valuestring, "CLOSED") == 0)
+                val = 0;
 
-        if (doorsense_arr && cJSON_IsArray(doorsense_arr))
-        {
-            field_count = cJSON_GetArraySize(doorsense_arr);
-            using_array = true;
-        }
-        else
-        {
-            /* accept legacy alias 'door_state' as array form too */
-            door_state_arr = cJSON_GetObjectItem(msg_payload, "door_state");
-            if (door_state_arr && cJSON_IsArray(door_state_arr))
+            // Look up or auto-assign global index
+            int global_idx = node_door_map[p_msg->node_id];
+            if (global_idx == -1)
             {
-                field_count = cJSON_GetArraySize(door_state_arr);
-                doorsense_arr = door_state_arr; /* reuse pointer */
-                using_array = true;
+                // First time: try node_id as default global index for convenience
+                global_idx = p_msg->node_id;
+                if (global_idx >= NUM_DOOR_SENSORS || door_owner[global_idx] != -1)
+                {
+                    // node_id slot taken or out of range, find next free slot
+                    global_idx = find_next_free_door_slot();
+                    if (global_idx == -1)
+                    {
+                        ESP_LOGW(TAG, "Node %d: no free global door slots available", p_msg->node_id);
+                        return ESP_FAIL;
+                    }
+                }
+                // Assign mapping and claim ownership
+                node_door_map[p_msg->node_id] = global_idx;
+                door_owner[global_idx] = p_msg->node_id;
+                ESP_LOGI(TAG, "Node %d door → global door %d", p_msg->node_id, global_idx);
             }
             else
             {
-                /* Count per-index keys if no array is present */
-                cJSON *current_item = msg_payload->child;
-                while (current_item)
+                // Mapping exists, verify ownership
+                if (door_owner[global_idx] != p_msg->node_id)
                 {
-                    if (current_item->string && (strncmp(current_item->string, "doorsense_", 10) == 0 || strncmp(current_item->string, "door_state_", 11) == 0))
-                        field_count++;
+                    ESP_LOGW(TAG, "Node %d door mapped to global %d, but owned by node %d - REJECTED",
+                             p_msg->node_id, global_idx, door_owner[global_idx]);
+                    return ESP_FAIL;
+                }
+            }
+
+            // Store the value (ownership already verified)
+            if (nodeio_set_sensor_lut_field(p_msg, 0, "doorsense", (size_t)global_idx, &val) != NIO_OK)
+            {
+                ESP_LOGW(TAG, "Failed to set sporadic doorsense_%d", global_idx);
+                return ESP_FAIL;
+            }
+
+            const char *sval = (val == 1) ? "OPEN" : (val == 0) ? "CLOSED"
+                                                                : "UNKNOWN";
+            ESP_LOGI(TAG, "Node %d: door = %s (global slot %d)", p_msg->node_id, sval, global_idx);
+            return ESP_OK;
+        }
+
+        /* Legacy per-index format: "doorsense_N": "OPEN"
+         * Since we now do single-door-per-node, we treat any doorsense_N key
+         * as the node's single door, ignoring the N suffix. Just look for first match. */
+
+        cJSON *current_item = msg_payload->child;
+        while (current_item)
+        {
+            if (!current_item->string)
+            {
+                current_item = current_item->next;
+                continue;
+            }
+
+            // Check if this is a doorsense_N or door_state_N key
+            if (strncmp(current_item->string, "doorsense_", 10) == 0 ||
+                strncmp(current_item->string, "door_state_", 11) == 0)
+            {
+                // Parse the value (string or number)
+                uint8_t val = 0xFF;
+                if (cJSON_IsString(current_item))
+                {
+                    if (strcmp(current_item->valuestring, "OPEN") == 0)
+                        val = 1;
+                    else if (strcmp(current_item->valuestring, "CLOSED") == 0)
+                        val = 0;
+                }
+                else if (cJSON_IsNumber(current_item))
+                {
+                    val = (uint8_t)current_item->valueint;
+                }
+
+                if (val == 0xFF)
+                {
                     current_item = current_item->next;
+                    continue; // Skip unknown values
                 }
+
+                // Use same auto-assignment logic as new single-door format
+                int global_idx = node_door_map[p_msg->node_id];
+                if (global_idx == -1)
+                {
+                    // First door event from this node, auto-assign
+                    global_idx = p_msg->node_id;
+                    if (global_idx >= NUM_DOOR_SENSORS || door_owner[global_idx] != -1)
+                    {
+                        global_idx = find_next_free_door_slot();
+                        if (global_idx == -1)
+                        {
+                            ESP_LOGW(TAG, "Node %d: no free global door slots available (legacy format)", p_msg->node_id);
+                            return ESP_FAIL;
+                        }
+                    }
+                    node_door_map[p_msg->node_id] = global_idx;
+                    door_owner[global_idx] = p_msg->node_id;
+                    ESP_LOGI(TAG, "Node %d door → global door %d (legacy format)", p_msg->node_id, global_idx);
+                }
+
+                // Store the value
+                if (nodeio_set_sensor_lut_field(p_msg, 0, "doorsense", (size_t)global_idx, &val) != NIO_OK)
+                {
+                    ESP_LOGW(TAG, "Failed to set sporadic doorsense_%d", global_idx);
+                    return ESP_FAIL;
+                }
+
+                const char *sval = (val == 1) ? "OPEN" : (val == 0) ? "CLOSED"
+                                                                    : "UNKNOWN";
+                ESP_LOGI(TAG, "Node %d: door = %s (global slot %d, legacy format)", p_msg->node_id, sval, global_idx);
+                return ESP_OK; // Successfully processed first door key found
             }
+
+            current_item = current_item->next;
         }
 
-        if (field_count > (int)fld->elem_count)
-            field_count = (int)fld->elem_count;
-
-        /* For array mode, iterate through field_count indices.
-           For per-index key mode, iterate through all possible door indices. */
-        int loop_max = using_array ? field_count : (int)fld->elem_count;
-
-        for (int i = 0; i < loop_max; ++i)
-        {
-            uint8_t val = 0xFF; // unknown
-
-            if (using_array && doorsense_arr)
-            {
-                cJSON *itm = cJSON_GetArrayItem(doorsense_arr, i);
-                if (itm)
-                {
-                    if (cJSON_IsString(itm))
-                    {
-                        if (strcmp(itm->valuestring, "OPEN") == 0)
-                            val = 1;
-                        else if (strcmp(itm->valuestring, "CLOSED") == 0)
-                            val = 0;
-                    }
-                    else if (cJSON_IsNumber(itm))
-                    {
-                        val = (uint8_t)itm->valueint;
-                    }
-                }
-            }
-            else
-            {
-                /* per-index key lookup */
-                char key[32];
-                char key_alt[32];
-                snprintf(key, sizeof(key), "doorsense_%d", i);
-                cJSON *door_state_item = cJSON_GetObjectItem(msg_payload, key);
-                if (!door_state_item)
-                {
-                    snprintf(key_alt, sizeof(key_alt), "door_state_%d", i);
-                    door_state_item = cJSON_GetObjectItem(msg_payload, key_alt);
-                }
-                if (door_state_item)
-                {
-                    if (cJSON_IsString(door_state_item))
-                    {
-                        if (strcmp(door_state_item->valuestring, "OPEN") == 0)
-                            val = 1;
-                        else if (strcmp(door_state_item->valuestring, "CLOSED") == 0)
-                            val = 0;
-                    }
-                    else if (cJSON_IsNumber(door_state_item))
-                    {
-                        val = (uint8_t)door_state_item->valueint;
-                    }
-                }
-                else
-                {
-                    /* No door event for this index, skip ownership check and storage */
-                    continue;
-                }
-            }
-
-            /* Check door sensor ownership before accepting the event */
-            if (door_owner[i] == -1)
-            {
-                /* Unclaimed, assign ownership to this node */
-                door_owner[i] = p_msg->node_id;
-                ESP_LOGI(TAG, "Node %d claimed ownership of door sensor %d", p_msg->node_id, i);
-            }
-            else if (door_owner[i] != p_msg->node_id)
-            {
-                /* Already owned by a different node, reject this door event */
-                ESP_LOGW(TAG, "Node %d attempted to register door sensor %d, but it's already owned by node %d - REJECTED",
-                         p_msg->node_id, i, door_owner[i]);
-                continue; /* Skip this door index */
-            }
-            /* else: already owned by this node, allow update */
-
-            /* payload_index is ignored for sporadic fields by the helper, pass 0 */
-            if (nodeio_set_sensor_lut_field(p_msg, 0, "doorsense", (size_t)i, &val) != NIO_OK)
-            {
-                ESP_LOGW(TAG, "Failed to set sporadic doorsense_%d", i);
-            }
-            else
-            {
-                /* Log the received doorsense value immediately for visibility */
-                const char *sval = "UNKNOWN";
-                if (val == 1)
-                    sval = "OPEN";
-                else if (val == 0)
-                    sval = "CLOSED";
-                ESP_LOGI(TAG, "Node %d event: doorsense_%d = %s", p_msg->node_id, i, sval);
-            }
-        }
+        // No door keys found
+        ESP_LOGW(TAG, "Door event payload has no recognizable door state fields");
         return ESP_OK;
     }
     else
@@ -687,7 +705,7 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
 
     // Convert type_str to enum msg_type_t and validate before allocating message buffer
     msg_type_t msg_type = nodeio_type_str_to_enum(type_str);
-    ESP_LOGI(TAG, "Message type: %s, 0x%02X", type_str, msg_type);
+    ESP_LOGD(TAG, "Message type: %s, 0x%02X", type_str, msg_type);
     // Check if the message type is valid
     if (msg_type == MSG_UNKNOWN)
     {
@@ -1221,6 +1239,9 @@ static void nodeio_handle_disconnect(int client_fd, uint8_t node_id)
         }
     }
 
+    // Clear node_door_map entry for this node
+    node_door_map[node_id] = -1;
+
     // Handle client disconnection
     websockserver_session_remove(client_fd);
 
@@ -1656,8 +1677,8 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
                         for (size_t z = 0; z < elem_cnt; ++z)
                             dsbuf[z] = 0xFF;
 
-                        /* Temporary publish-time debug: log which source we use and current sporadic cap mask */
-                        ESP_LOGI(TAG, "publish nodeslist: node %d doorsense source=%s ptr=%p sporadic_cap_mask=0x%08X",
+                        /* Debug: log which source we use and current sporadic cap mask */
+                        ESP_LOGD(TAG, "publish nodeslist: node %d doorsense source=%s ptr=%p sporadic_cap_mask=0x%08X",
                                  ctx->p_node->node_id, (pevt ? "event" : "periodic"), (void *)sporadic_source,
                                  (unsigned)sporadic_source->payload.sporadic_data.current_cap_mask);
 
@@ -1698,9 +1719,9 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
 
                             dbg[sizeof(dbg) - 1] = '\0';
                             if (emitted_count > 0)
-                                ESP_LOGI(TAG, "publish nodeslist: node %d doorsense (owned only): %s", ctx->p_node->node_id, dbg);
+                                ESP_LOGD(TAG, "publish nodeslist: node %d doorsense (owned only): %s", ctx->p_node->node_id, dbg);
                             else
-                                ESP_LOGI(TAG, "publish nodeslist: node %d doorsense (owned only): (none)", ctx->p_node->node_id);
+                                ESP_LOGD(TAG, "publish nodeslist: node %d doorsense (owned only): (none)", ctx->p_node->node_id);
                         }
                     }
                 }
@@ -1765,6 +1786,13 @@ esp_err_t nodeio_init(void)
 {
     // Set a less-verbose default log level to avoid noisy debug output in normal operation
     esp_log_level_set(TAG, ESP_LOG_INFO);
+
+    // Initialize node_door_map to -1 (no door assigned)
+    for (int i = 0; i < MAX_NODES; i++)
+    {
+        node_door_map[i] = -1;
+    }
+
     // Initialize WebSocket server
     ESP_LOGI(TAG, "NodeIO initialized");
     // websockserver_init() already called in webserver_init()

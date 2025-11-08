@@ -184,7 +184,7 @@ void monitor_process_rmt_rx(void)
         {
             float t0_us = syms[i].duration0 / 10.0f;
             float t1_us = syms[i].duration1 / 10.0f;
-            ESP_LOGI(TAG, "lvl0=%d t0=%.1fus | lvl1=%d t1=%.1fus",
+            ESP_LOGD(TAG, "lvl0=%d t0=%.1fus | lvl1=%d t1=%.1fus",
                      syms[i].level0, t0_us, syms[i].level1, t1_us);
         }
         // Re-arm RMT for next event

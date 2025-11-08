@@ -403,11 +403,34 @@ typedef enum {
 #### 4.3.6 Door Sensor (Sporadic)
 - **Unit**: State (OPEN/CLOSED/UNKNOWN)
 - **Type**: string or numeric (1=OPEN, 0=CLOSED, 255=UNKNOWN)
-- **Indices**: 0 to 2 (NUM_DOOR_SENSORS = 3)
 - **Delivery**: Event-driven via `node_event` message type
-- **Ownership**: Each door index can only be claimed by one node (first-come, first-served)
-- **Format**: Per-index keys (`doorsense_0`, `doorsense_1`, `doorsense_2`) or array (`doorsense: ["OPEN", "CLOSED", "UNKNOWN"]`)
-- **Legacy alias**: `door_state` accepted as equivalent to `doorsense`
+- **Ownership**: Hub auto-assigns global indices per node on first event
+- **Node Perspective**: Each node reports a single door using simple format
+
+**Format Options:**
+
+1. **Single-door (preferred)** - Simple and practical:
+   ```json
+   {
+     "event_type": "EVENT_DOOR",
+     "state": "OPEN"  // Node's only door
+   }
+   ```
+
+2. **Legacy per-index format** (deprecated) - Global index keys:
+   ```json
+   {
+     "event_type": "EVENT_DOOR",
+     "doorsense_0": "OPEN"
+   }
+   ```
+
+**Hub Responsibilities:**
+- Maintain mapping: `node_door_map[node_id] → global_display_index`
+- Auto-assign global indices on first event from each node
+- Prefer `node_id` as global index when available (e.g., node 5 → door 5)
+- Fall back to next free slot if preferred index is taken
+- Display doors in UI using auto-assigned global indices or configured friendly names
 
 ### 4.4 Diagnostic Data Types
 

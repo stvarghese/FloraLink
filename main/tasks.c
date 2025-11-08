@@ -380,11 +380,12 @@ static void init_task(void *pvParameters)
     esp_log_level_set("SESSION_REMOVE", ESP_LOG_DEBUG);
     esp_log_level_set("NODESLIST", ESP_LOG_DEBUG);
 #endif
-    esp_log_level_set("onboardled", ESP_LOG_DEBUG);
-    esp_log_level_set("wifi", ESP_LOG_DEBUG);
-    esp_log_level_set("WiFiSetup", ESP_LOG_DEBUG);
-    esp_log_level_set("ModeManager", ESP_LOG_DEBUG);
-    esp_log_level_set("FloraLink", ESP_LOG_DEBUG);
+    // Commented out to allow modules to use their own INFO/DEBUG log levels
+    // esp_log_level_set("onboardled", ESP_LOG_DEBUG);
+    // esp_log_level_set("wifi", ESP_LOG_DEBUG);
+    // esp_log_level_set("WiFiSetup", ESP_LOG_DEBUG);
+    // esp_log_level_set("ModeManager", ESP_LOG_DEBUG);
+    // esp_log_level_set("FloraLink", ESP_LOG_DEBUG);
     // esp_log_level_set("monitor", ESP_LOG_DEBUG);
     blink_init();
 

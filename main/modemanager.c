@@ -257,9 +257,11 @@ void modemanager_enter_active_auto(void)
         // Configure WiFi for active mode - shorter listen interval for maximum responsiveness
         wifi_configure_active_mode();
 
-        // temporarily disable all
-        //  Resume RMT monitoring for full functionality during active periods
+        // Resume RMT monitoring for full functionality during active periods
         monitor_resume_rmt();
+
+        // Resume LED strip RMT for visual feedback during active mode
+        onboardled_resume_led_strip();
 
         // print empty line for readability
         printf("\n");
@@ -326,14 +328,25 @@ void modemanager_exit_active_auto(void)
 
     // print empty line for readability
     printf("\n");
+
+#ifdef CONFIG_FLORALINK_DEBUG_LED_ANIMATIONS
+    // Show brief breathing pattern as visual indication of entering idle mode
+    // This completes before we suspend RMT to avoid holding PM locks
+    ESP_LOGI(TAG, "Showing idle entry pattern (2 breathing cycles, ~4s)");
+    onboardled_start_breathing(750, 250, 1000, 2, &ONBOARDLED_COLOR_BLUE);
+
+    // Wait for breathing pattern to complete (2 cycles × 2s each = 4s max)
+    // Pattern calculation: fade_in(750ms) + fade_out(250ms) + pause(1000ms) = 2000ms per cycle
+    vTaskDelay(pdMS_TO_TICKS(4500)); // 2 cycles + 500ms safety margin
+#endif
+
     // Suspend RMT monitoring to release APB_FREQ_MAX lock for better sleep
     monitor_suspend_rmt();
 
-    // Signal entering idle mode with LED pattern
-    onboardled_signal_code(2, 100, 50, 300, &ONBOARDLED_COLOR_BLUE); // 2 blue flashes = "entering idle"
+    // Suspend LED strip RMT to release APB_FREQ_MAX lock for power savings
+    onboardled_suspend_led_strip();
 
-    // start breathing pattern: onboardled_start_breathing(uint32_t fade_in_ms, uint32_t fade_out_ms, uint32_t pause_ms, uint32_t cycles, onboardled_color_t *color)
-    onboardled_start_breathing(750, 250, 2000, 3, &ONBOARDLED_COLOR_BLUE);
+    ESP_LOGI(TAG, "Entered idle mode - LED and RMT suspended for maximum power savings");
 
     // No explicit sleep call - auto light sleep will handle power management
     // Tasks will automatically sleep during vTaskDelay() and idle periods

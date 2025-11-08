@@ -13,6 +13,7 @@ static const char *TAG = "test_led_app";
 #endif
 
 static SemaphoreHandle_t s_button_sem = NULL;
+static TaskHandle_t s_demo_task = NULL;
 
 static void IRAM_ATTR button_isr_handler(void *arg)
 {
@@ -22,6 +23,44 @@ static void IRAM_ATTR button_isr_handler(void *arg)
     {
         portYIELD_FROM_ISR();
     }
+}
+
+static void demo_task(void *arg)
+{
+    ESP_LOGI(TAG, "Demo task started");
+
+    if (onboardled_start_breathing(750, 1250, 1000, 3, &ONBOARDLED_COLOR_BLUE))
+    {
+        /* Wait for breathing to finish (can be interrupted via onboardled_stop_pattern()) */
+        while (onboardled_is_pattern_running())
+        {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        ESP_LOGI(TAG, "Breathing demo complete — running follow-up patterns");
+
+        onboardled_quick_flash(3, NULL);
+        vTaskDelay(pdMS_TO_TICKS(200));
+
+        ESP_LOGI(TAG, "Heartbeat x3");
+        onboardled_heartbeat(3, 120, 300, 400, &ONBOARDLED_COLOR_CYAN);
+
+        ESP_LOGI(TAG, "Success then failure patterns");
+        onboardled_success(NULL);
+        vTaskDelay(pdMS_TO_TICKS(300));
+        onboardled_failure(NULL);
+
+        ESP_LOGI(TAG, "Dance sequence (4 cycles)");
+        onboardled_dance(4, 150, 80);
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Could not start breathing (pattern busy)");
+    }
+
+    ESP_LOGI(TAG, "Demo task complete");
+    s_demo_task = NULL;
+    vTaskDelete(NULL);
 }
 
 static void led_button_task(void *arg)
@@ -39,25 +78,28 @@ static void led_button_task(void *arg)
             int level = gpio_get_level(TEST_BUTTON_GPIO);
             if (level == 0)
             {
-                // Toggle breathing pattern on each press
-                if (!breathing_on)
+                /* Start demo in separate task so the button handler remains responsive.
+                 * If a demo is already running, stop it immediately.
+                 */
+                if (s_demo_task != NULL)
                 {
-                    ESP_LOGI(TAG, "Starting breathing (1000ms in/out, 2000ms pause)");
-                    // start infinite breathing
-                    if (onboardled_start_breathing(1000, 1000, 2000, 0, &ONBOARDLED_COLOR_BLUE))
-                    {
-                        breathing_on = true;
-                    }
-                    else
-                    {
-                        ESP_LOGW(TAG, "Could not start breathing (pattern busy)");
-                    }
+                    ESP_LOGI(TAG, "Button pressed: stopping running demo/patterns");
+                    onboardled_stop_pattern();
+                    /* Delete the demo task to ensure it doesn't continue blocking the button task.
+                     * Deleting a task from another task is allowed in FreeRTOS for this test harness.
+                     */
+                    vTaskDelete(s_demo_task);
+                    s_demo_task = NULL;
+                    breathing_on = false;
                 }
                 else
                 {
-                    ESP_LOGI(TAG, "Stopping breathing");
-                    onboardled_stop_pattern();
-                    breathing_on = false;
+                    ESP_LOGI(TAG, "Button pressed: starting demo task (breathing + follow-up)");
+                    if (xTaskCreate(demo_task, "led_demo_task", 4096, NULL, 4, &s_demo_task) != pdPASS)
+                    {
+                        ESP_LOGW(TAG, "Failed to start demo task");
+                        s_demo_task = NULL;
+                    }
                 }
 
                 // Small delay to avoid retriggering too quickly

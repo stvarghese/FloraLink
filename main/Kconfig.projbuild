@@ -69,4 +69,16 @@ menu "FloraLink Configuration"
         help
             GPIO number (IOxx) used to monitor another GPIO pulse using RMT.
 
+    config FLORALINK_DEBUG_LED_ANIMATIONS
+        bool "Enable Debug LED animations"
+        default n
+        help
+            Show a brief breathing LED animation when entering idle mode.
+            This provides visual feedback but extends active power consumption by ~4.5 seconds.
+            
+            Enabled: 2-cycle breathing animation (~4.5s, 15% overhead per active->idle transition)
+            Disabled: Immediate sleep entry (0% overhead, maximum power savings)
+            
+            Recommended: Enable for development/debugging, disable for production battery-powered deployments.
+
 endmenu

@@ -85,6 +85,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "commonutils.h"
+#include <math.h>
 
 static const char *TAG = "ONBOARDLED";
 
@@ -186,6 +187,70 @@ typedef struct
 } pattern_context_t;
 
 static pattern_context_t s_pattern_ctx = {0};
+
+// Gamma LUT: maps 0..255 input -> (mapped * 256) where mapped is in 0..BRLEVEL
+static uint16_t s_gamma_lut[256];
+static bool s_gamma_enabled = true;   // enable gamma by default
+static float s_gamma_value = 2.2f;    // perceptual gamma
+static bool s_dither_enabled = false; // auto-enabled in init when BRLEVEL small
+
+// Simple xorshift RNG (32-bit) for stochastic dithering — cheap and small
+static uint32_t s_rng_state = 0xDEADBEEF;
+
+static inline uint8_t rng8(void)
+{
+    // xorshift32
+    s_rng_state ^= s_rng_state << 13;
+    s_rng_state ^= s_rng_state >> 17;
+    s_rng_state ^= s_rng_state << 5;
+    return (uint8_t)(s_rng_state >> 24);
+}
+
+// Initialize gamma LUT. Each entry is (mapped_value * 256)
+static void gamma_lut_init(void)
+{
+    if (!s_gamma_enabled)
+        return;
+
+    for (int i = 0; i < 256; ++i)
+    {
+        float fin = (float)i / 255.0f;
+        float mout = powf(fin, s_gamma_value) * (float)BRLEVEL;
+        if (mout < 0.0f)
+            mout = 0.0f;
+        if (mout > (float)BRLEVEL)
+            mout = (float)BRLEVEL;
+        uint16_t scaled = (uint16_t)(mout * 256.0f); // fractional stored in low 8 bits
+        s_gamma_lut[i] = scaled;
+    }
+}
+
+// Map an input channel value (0..255) to the final driver channel 0..BRLEVEL,
+// applying gamma (via LUT) and optional stochastic temporal dithering.
+static inline uint8_t map_channel(uint8_t in)
+{
+    if (!s_gamma_enabled)
+    {
+        // Simple linear scale: 0..255 -> 0..BRLEVEL
+        if (BRLEVEL == 255)
+            return in;
+        return (uint8_t)(((uint32_t)in * (uint32_t)BRLEVEL + 127) / 255);
+    }
+
+    uint16_t scaled = s_gamma_lut[in];
+    uint8_t iv = (uint8_t)(scaled >> 8);
+    uint8_t frac = (uint8_t)(scaled & 0xFF);
+    uint8_t out = iv;
+    if (s_dither_enabled && frac)
+    {
+        uint8_t r = rng8();
+        if (r < frac && out < BRLEVEL)
+            out++;
+    }
+    if (out > BRLEVEL)
+        out = BRLEVEL;
+    return out;
+}
 
 // PWM (LEDC) state for single-GPIO LEDs (non-strip)
 #ifndef CONFIG_BLINK_LED_STRIP
@@ -490,7 +555,7 @@ static void pattern_timer_callback(void *arg)
             // This callback is invoked after the configured pause_ms; start the
             // next fade-in step (or complete) without re-clearing or re-scheduling
             // the pause.
-            ESP_LOGI(TAG, "Entering PAUSE state: pausing %lu ms (LED already cleared)", s_pattern_ctx.pause_ms);
+            ESP_LOGD(TAG, "Entering PAUSE state: pausing %lu ms (LED already cleared)", s_pattern_ctx.pause_ms);
 
             if (s_pattern_ctx.count == 0 || s_pattern_ctx.current_count < s_pattern_ctx.count)
             {
@@ -723,39 +788,41 @@ static inline void onboardled_write(bool on)
  */
 static inline void onboardled_write_color(bool on, onboardled_color_t color)
 {
+    /* Normalize input color domain: callers historically used BRLEVEL-scaled
+     * macros (e.g., RED = {BRLEVEL,0,0}). The driver now expects 0..255
+     * conventional inputs before applying gamma LUT. Detect the legacy
+     * BRLEVEL domain when all components are <= BRLEVEL and BRLEVEL < 255,
+     * then scale up to 0..255 so existing macros continue to work. */
+    uint8_t in_r = color.r;
+    uint8_t in_g = color.g;
+    uint8_t in_b = color.b;
+    uint8_t nr = in_r;
+    uint8_t ng = in_g;
+    uint8_t nb = in_b;
+    bool scaled_from_brlevel = false;
+    if (BRLEVEL < 255 && in_r <= BRLEVEL && in_g <= BRLEVEL && in_b <= BRLEVEL)
+    {
+        // scale: nr = round(in * 255 / BRLEVEL)
+        nr = (uint8_t)(((uint32_t)in_r * 255u + (BRLEVEL / 2)) / BRLEVEL);
+        ng = (uint8_t)(((uint32_t)in_g * 255u + (BRLEVEL / 2)) / BRLEVEL);
+        nb = (uint8_t)(((uint32_t)in_b * 255u + (BRLEVEL / 2)) / BRLEVEL);
+        scaled_from_brlevel = true;
+    }
+
 #ifdef CONFIG_BLINK_LED_STRIP
     if (s_strip_initialized && led_strip != NULL)
     {
-        /* Enforce contract: color components are interpreted as 0..BRLEVEL.
-         * If callers passed values > BRLEVEL, clamp and warn. Use the
-         * clamped values for hardware operations. */
-        uint8_t cr = color.r;
-        uint8_t cg = color.g;
-        uint8_t cb = color.b;
-        bool clamped = false;
-        if (cr > BRLEVEL)
-        {
-            cr = BRLEVEL;
-            clamped = true;
-        }
-        if (cg > BRLEVEL)
-        {
-            cg = BRLEVEL;
-            clamped = true;
-        }
-        if (cb > BRLEVEL)
-        {
-            cb = BRLEVEL;
-            clamped = true;
-        }
-        if (clamped)
-        {
-            ESP_LOGW(TAG, "color components exceeded BRLEVEL (%u); clamping to %u", BRLEVEL, BRLEVEL);
-        }
+        /* Map input colors (0..255) through gamma LUT and optional dithering
+         * into the driver domain (0..BRLEVEL). This lets callers continue to
+         * pass conventional 0..255 colors while the driver enforces the
+         * hardware brightness ceiling and perceptual mapping. */
+        uint8_t cr = map_channel(nr);
+        uint8_t cg = map_channel(ng);
+        uint8_t cb = map_channel(nb);
 
         if (on)
         {
-            // Set pixel to the specified (clamped) RGB color and refresh the strip
+            // Set pixel to the mapped RGB color and refresh the strip
             esp_err_t rc = led_strip_set_pixel(led_strip, 0, cr, cg, cb);
             if (rc != ESP_OK)
             {
@@ -766,7 +833,14 @@ static inline void onboardled_write_color(bool on, onboardled_color_t color)
             {
                 ESP_LOGW(TAG, "led_strip_refresh (on) failed: %d", rc);
             }
-            ESP_LOGI(TAG, "LED set to R=%u G=%u B=%u (clamped=%s)", cr, cg, cb, clamped ? "true" : "false");
+            if (scaled_from_brlevel)
+            {
+                ESP_LOGD(TAG, "LED set to R=%u G=%u B=%u (mapped) [scaled from BRLEVEL inputs %u/%u/%u]", cr, cg, cb, in_r, in_g, in_b);
+            }
+            else
+            {
+                ESP_LOGD(TAG, "LED set to R=%u G=%u B=%u (mapped)", cr, cg, cb);
+            }
         }
         else
         {
@@ -832,30 +906,26 @@ static inline void onboardled_write_color(bool on, onboardled_color_t color)
                 }
             }
 
-            ESP_LOGI(TAG, "LED cleared (off)");
+            ESP_LOGD(TAG, "LED cleared (off)");
         }
     }
 #else
     // For GPIO LED, try to use LEDC PWM if available; otherwise fall back to simple GPIO level
     if (s_ledc_initialized)
     {
-        /* Enforce contract: interpret color components as 0..BRLEVEL. Clamp if necessary. */
-        uint32_t eff_r = color.r;
-        uint32_t eff_g = color.g;
-        uint32_t eff_b = color.b;
-        if (eff_r > BRLEVEL)
-            eff_r = BRLEVEL;
-        if (eff_g > BRLEVEL)
-            eff_g = BRLEVEL;
-        if (eff_b > BRLEVEL)
-            eff_b = BRLEVEL;
+        /* Map input colors (0..255) through gamma LUT and optional dithering
+         * into the driver domain (0..BRLEVEL), then compute PWM duty from
+         * the resulting perceived brightness (max channel). */
+        uint8_t mr = map_channel(nr);
+        uint8_t mg = map_channel(ng);
+        uint8_t mb = map_channel(nb);
 
         /* Compute perceived brightness as maximum of channels (0..BRLEVEL) */
-        uint32_t brightness_level = eff_r;
-        if (eff_g > brightness_level)
-            brightness_level = eff_g;
-        if (eff_b > brightness_level)
-            brightness_level = eff_b;
+        uint32_t brightness_level = mr;
+        if (mg > brightness_level)
+            brightness_level = mg;
+        if (mb > brightness_level)
+            brightness_level = mb;
 
         /* Map brightness_level (0..BRLEVEL) into LEDC duty (0..max_duty) */
         uint32_t max_duty = ((1 << LEDC_TIMER_8_BIT) - 1);
@@ -960,6 +1030,15 @@ void onboardled_begin(uint8_t pin, bool active_low)
 
     // Initialize pattern timer
     init_pattern_timer();
+
+    // Initialize gamma LUT and dithering policy
+    gamma_lut_init();
+    // Enable stochastic dithering automatically for small BRLEVEL values
+    if (BRLEVEL <= 32)
+    {
+        s_dither_enabled = true;
+    }
+    ESP_LOGD(TAG, "gamma=%f enabled=%s dither=%s BRLEVEL=%u", s_gamma_value, s_gamma_enabled ? "true" : "false", s_dither_enabled ? "true" : "false", (unsigned)BRLEVEL);
 
     HEAP_TRACE_END(100); // LED strip initialization may allocate driver resources
     ESP_LOGD(TAG, "Initialized LED on pin %d, active_low=%s", s_pin, active_low ? "true" : "false");
@@ -1327,8 +1406,8 @@ void onboardled_set_period_ms(uint32_t period_ms)
     s_blink_period_ms = period_ms;
 }
 
-// LED dance using blocking pattern, cycling through predefined special colours
-void onboardled_dance(uint32_t cycles, uint32_t on_ms, uint32_t off_ms)
+// LED disco using blocking pattern, cycling through predefined special colours
+void onboardled_disco(uint32_t cycles, uint32_t on_ms, uint32_t off_ms)
 {
     onboardled_color_t colors[] =
         {
@@ -1346,4 +1425,85 @@ void onboardled_dance(uint32_t cycles, uint32_t on_ms, uint32_t off_ms)
             vTaskDelay(pdMS_TO_TICKS(off_ms));
         }
     }
+}
+
+// ==================== POWER MANAGEMENT FUNCTIONS ====================
+
+// State tracking for LED strip suspend/resume
+static bool s_led_strip_suspended = false;
+
+void onboardled_suspend_led_strip(void)
+{
+#ifdef CONFIG_BLINK_LED_STRIP
+    if (led_strip && s_strip_initialized && !s_led_strip_suspended)
+    {
+        ESP_LOGI(TAG, "Suspending LED strip RMT for power savings");
+
+        // Stop any running pattern first
+        onboardled_stop_pattern();
+
+        // Ensure LED is off before suspending
+        esp_err_t ret = led_strip_clear(led_strip);
+        if (ret == ESP_OK)
+        {
+            ret = led_strip_refresh(led_strip);
+        }
+
+        if (ret != ESP_OK)
+        {
+            ESP_LOGW(TAG, "led_strip_refresh (clear) failed: %d", ret);
+        }
+
+        s_led_strip_suspended = true;
+
+        // The led_strip driver in ESP-IDF doesn't expose direct RMT channel control,
+        // but we can delete and recreate the strip to release the RMT resources.
+        // For now, just clear it - the RMT will stay enabled but in idle state.
+        // A full solution would require modifying the led_strip component or
+        // managing RMT channels directly.
+
+        ESP_LOGD(TAG, "LED strip cleared for idle mode (RMT channel remains allocated)");
+    }
+    else if (s_led_strip_suspended)
+    {
+        ESP_LOGD(TAG, "LED strip already suspended, skipping");
+    }
+#else
+    // GPIO-based LED doesn't use RMT, nothing to suspend
+    ESP_LOGD(TAG, "GPIO LED - no RMT to suspend");
+#endif
+}
+
+void onboardled_resume_led_strip(void)
+{
+#ifdef CONFIG_BLINK_LED_STRIP
+    if (led_strip && s_strip_initialized && s_led_strip_suspended)
+    {
+        ESP_LOGI(TAG, "Resuming LED strip RMT for active mode");
+
+        // LED strip is already initialized and RMT channel is enabled
+        // Just ensure it's in a known state
+        esp_err_t ret = led_strip_clear(led_strip);
+        if (ret == ESP_OK)
+        {
+            ret = led_strip_refresh(led_strip);
+        }
+
+        if (ret != ESP_OK)
+        {
+            ESP_LOGW(TAG, "led_strip_refresh (resume) failed: %d", ret);
+        }
+
+        s_led_strip_suspended = false;
+
+        ESP_LOGD(TAG, "LED strip ready for active mode");
+    }
+    else if (!s_led_strip_suspended)
+    {
+        ESP_LOGD(TAG, "LED strip already active, skipping");
+    }
+#else
+    // GPIO-based LED doesn't use RMT, nothing to resume
+    ESP_LOGD(TAG, "GPIO LED - no RMT to resume");
+#endif
 }

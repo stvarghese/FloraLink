@@ -17,6 +17,8 @@
 #include "nodeio_lut.h"
 #include "nodeio_sensors.h"
 #include "nodeio_services.h"
+#include "nvm.h"
+#include "appl_nvm.h"
 // #include <esp_heap_caps.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -87,6 +89,9 @@ static esp_err_t nodeslist_get_handler(httpd_req_t *req)
         }                                                                          \
     } while (0)
 
+// `url_decode` is provided by commonutils.h (returns int). Do not define a
+// conflicting static helper here.
+
 // HTTP GET handler for /stats
 static esp_err_t stats_get_handler(httpd_req_t *req)
 {
@@ -154,6 +159,82 @@ static esp_err_t configure_get_handler(httpd_req_t *req)
     snprintf(input, sizeof(input), "<input type='number' id='period' name='period' min='%d' max='%d' value='%lu' required>", BLINK_PERIOD_MIN, BLINK_PERIOD_MAX, blink_get_period_ms());
     SEND_HTML_CHUNK(input);
     SEND_HTML_CHUNK("<button type='submit'>Update</button>");
+    SEND_HTML_CHUNK("</form>");
+    // Door Sensor Mapping section
+    SEND_HTML_CHUNK("<h2>Door Sensor Mapping</h2>");
+    SEND_HTML_CHUNK("<form method='POST' action='/configure'>");
+    {
+        char dibuf[512];
+        nvm_door_map_block_t map = {0};
+        appl_nvm_get_door_map(&map);
+        for (int i = 0; i < NUM_DOOR_SENSORS; ++i)
+        {
+            /* Simple HTML escape for stored name */
+            char esc[DOOR_NAME_LEN * 2];
+            size_t eo = 0;
+            const char *src = map.names[i];
+            if (!src)
+                src = "";
+            for (size_t j = 0; src[j] != '\0' && eo + 8 < sizeof(esc); ++j)
+            {
+                char c = src[j];
+                if (c == '&')
+                {
+                    esc[eo++] = '&';
+                    esc[eo++] = 'a';
+                    esc[eo++] = 'm';
+                    esc[eo++] = 'p';
+                    esc[eo++] = ';';
+                }
+                else if (c == '<')
+                {
+                    esc[eo++] = '&';
+                    esc[eo++] = 'l';
+                    esc[eo++] = 't';
+                    esc[eo++] = ';';
+                }
+                else if (c == '>')
+                {
+                    esc[eo++] = '&';
+                    esc[eo++] = 'g';
+                    esc[eo++] = 't';
+                    esc[eo++] = ';';
+                }
+                else if (c == '"')
+                {
+                    esc[eo++] = '&';
+                    esc[eo++] = 'q';
+                    esc[eo++] = 'u';
+                    esc[eo++] = 'o';
+                    esc[eo++] = ';';
+                }
+                else
+                    esc[eo++] = c;
+            }
+            esc[eo] = '\0';
+
+            // Show label with current saved value in gray if it exists
+            if (esc[0] != '\0')
+            {
+                int n = snprintf(dibuf, sizeof(dibuf),
+                                 "<label for='door_%d'>Door Sensor %d: <span style='color:#999;font-weight:normal;'>(saved: %s)</span></label>"
+                                 "<input type='text' id='door_%d' name='door_%d' maxlength='%d' value='%s'><br>",
+                                 i, i, esc, i, i, DOOR_NAME_LEN - 1, esc);
+                if (n > 0)
+                    SEND_HTML_CHUNK(dibuf);
+            }
+            else
+            {
+                int n = snprintf(dibuf, sizeof(dibuf),
+                                 "<label for='door_%d'>Door Sensor %d: <span style='color:#999;font-weight:normal;'>(not configured)</span></label>"
+                                 "<input type='text' id='door_%d' name='door_%d' maxlength='%d' value='' placeholder='Enter door name'><br>",
+                                 i, i, i, i, DOOR_NAME_LEN - 1);
+                if (n > 0)
+                    SEND_HTML_CHUNK(dibuf);
+            }
+        }
+    }
+    SEND_HTML_CHUNK("<button type='submit'>Save Door Names</button>");
     SEND_HTML_CHUNK("</form>");
     // Sleep/Deep Sleep buttons
     SEND_HTML_CHUNK("<form method='POST' action='/configure' style='margin-top:32px;display:flex;gap:16px;justify-content:center;'>");
@@ -237,14 +318,31 @@ static esp_err_t subscribe_post_handler(httpd_req_t *req)
 static esp_err_t configure_post_handler(httpd_req_t *req)
 {
     modemanager_notify_activity_auto();
-    char buf[64];
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (ret <= 0)
+    // Read POST body robustly based on Content-Length (cap to 4KB)
+    size_t content_len = req->content_len;
+    const size_t MAX_POST = 4096;
+    if (content_len > MAX_POST)
+        content_len = MAX_POST;
+    char *buf = malloc(content_len + 1);
+    if (!buf)
     {
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
-    buf[ret] = '\0';
+    size_t received = 0;
+    while (received < content_len)
+    {
+        int r = httpd_req_recv(req, buf + received, content_len - received);
+        if (r <= 0)
+        {
+            free(buf);
+            httpd_resp_send_500(req);
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    buf[received] = '\0';
+
     // Parse: look for sleep/deep sleep or period
     if (strstr(buf, "sleep=light"))
     {
@@ -264,6 +362,77 @@ static esp_err_t configure_post_handler(httpd_req_t *req)
             blink_set_period_ms(period);
         }
     }
+
+    /* Parse door name fields: build local copy, then write once */
+    nvm_door_map_block_t local = {0};
+    appl_nvm_get_door_map(&local);
+
+    ESP_LOGD("WebServer", "POST body: %s", buf);
+
+    for (int i = 0; i < NUM_DOOR_SENSORS; ++i)
+    {
+        char key[32];
+        snprintf(key, sizeof(key), "door_%d=", i);
+        char *q = strstr(buf, key);
+        if (q)
+        {
+            q += strlen(key);
+
+            // Find the end of this value (next '&' or end of string)
+            char *end = strchr(q, '&');
+            size_t val_len = end ? (size_t)(end - q) : strlen(q);
+
+            // Create a temporary null-terminated copy for url_decode
+            char *temp_val = strndup(q, val_len);
+            if (!temp_val)
+            {
+                ESP_LOGW("WebServer", "Memory allocation failed for door_%d", i);
+                continue;
+            }
+
+            ESP_LOGD("WebServer", "Door %d raw value (len=%zu): '%s'", i, val_len, temp_val);
+
+            char val[DOOR_NAME_LEN * 2];
+            int __ud_rc = url_decode(temp_val, val, sizeof(val));
+            free(temp_val);
+
+            if (__ud_rc < 0)
+            {
+                ESP_LOGW("WebServer", "URL decode failed for door_%d", i);
+                val[0] = '\0';
+            }
+
+            ESP_LOGD("WebServer", "Door %d decoded value: '%s'", i, val);
+            // Strip newlines and control chars
+            for (char *s = val; *s; ++s)
+                if (*s == '\n' || *s == '\r')
+                    *s = ' ';
+            // Check length before copying
+            size_t decoded_len = strlen(val);
+            if (decoded_len >= DOOR_NAME_LEN)
+            {
+                ESP_LOGW("WebServer", "Door name %d truncated: %zu chars -> %d chars",
+                         i, decoded_len, DOOR_NAME_LEN - 1);
+            }
+            // Copy into local map, ensure NUL termination
+            memset(local.names[i], 0, DOOR_NAME_LEN);
+            strncpy(local.names[i], val, DOOR_NAME_LEN - 1);
+            ESP_LOGD("WebServer", "Parsed door_%d='%s'", i, local.names[i]);
+        }
+    }
+    // Commit updated map
+    ESP_LOGI("WebServer", "Committing door map to NVM");
+    bool save_ok = appl_nvm_set_door_map(&local);
+    if (save_ok)
+    {
+        ESP_LOGI("WebServer", "Door map saved successfully");
+    }
+    else
+    {
+        ESP_LOGE("WebServer", "Failed to save door map to NVM");
+    }
+
+    free(buf);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_sendstr(req, "<html><body><script>window.location='/configure';</script></body></html>");
     return ESP_OK;
@@ -432,6 +601,35 @@ static esp_err_t luts_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// HTTP GET handler for /door_map - return JSON array of configured door names
+static esp_err_t door_map_get_handler(httpd_req_t *req)
+{
+    modemanager_notify_activity_auto();
+    cJSON *root = cJSON_CreateObject();
+    cJSON *arr = cJSON_CreateArray();
+    nvm_door_map_block_t map = {0};
+    appl_nvm_get_door_map(&map);
+    for (int i = 0; i < NUM_DOOR_SENSORS; ++i)
+    {
+        /* map.names[i] is an array (never NULL). Check first char to see if name is present. */
+        cJSON_AddItemToArray(arr, cJSON_CreateString(map.names[i][0] ? map.names[i] : ""));
+    }
+    cJSON_AddItemToObject(root, "doors", arr);
+    char *out = cJSON_PrintUnformatted(root);
+    if (out)
+    {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, out, strlen(out));
+        cJSON_free(out);
+    }
+    else
+    {
+        httpd_resp_send_500(req);
+    }
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
 static const char *TAG = "WebServer";
 static uint32_t latest_distance = 0;
 static int32_t latest_error = 0;
@@ -535,6 +733,11 @@ esp_err_t webserver_init(void)
         .method = HTTP_GET,
         .handler = luts_get_handler,
         .user_ctx = NULL};
+    httpd_uri_t door_map_uri = {
+        .uri = "/door_map",
+        .method = HTTP_GET,
+        .handler = door_map_get_handler,
+        .user_ctx = NULL};
 
     // Static assets
     httpd_uri_t css_uri = {
@@ -568,6 +771,7 @@ esp_err_t webserver_init(void)
     httpd_register_uri_handler(server, &configure_post_uri);
     httpd_register_uri_handler(server, &nodeslist_uri);
     httpd_register_uri_handler(server, &luts_uri);
+    httpd_register_uri_handler(server, &door_map_uri);
     httpd_register_uri_handler(server, &sleepstatus_uri);
     httpd_register_uri_handler(server, &subscribe_post_uri);
 
@@ -593,11 +797,14 @@ void webserver_health_monitor(void)
     static size_t previous_free_heap = 0;
     static int low_heap_count = 0;
     static int leak_detection_count = 0;
+    static int consecutive_drops = 0; // Track sustained memory drops
+    static size_t baseline_heap = 0;  // Baseline for trend detection
 
     if (first_run)
     {
         ESP_LOGI(TAG, "Server health monitor started");
         first_run = false;
+        baseline_heap = esp_get_free_heap_size();
     }
 
     HEAP_TRACE_START("HEALTH_MONITOR");
@@ -648,18 +855,56 @@ void webserver_health_monitor(void)
         ESP_LOGW(TAG, "High number of open connections: %zu", open_fds);
     }
 
-    // Enhanced memory leak detection
+    // Enhanced memory leak detection with trend analysis
     size_t current_free_heap = esp_get_free_heap_size();
 
-    // Memory leak detection - compare with previous measurement
-    if (previous_free_heap > 0 && current_free_heap < previous_free_heap)
+    // Memory leak detection - require sustained drops to reduce false positives
+    if (previous_free_heap > 0)
     {
-        size_t heap_drop = previous_free_heap - current_free_heap;
-        if (heap_drop > 128) // Significant drop (>128 bytes in 30 seconds)
+        if (current_free_heap < previous_free_heap)
         {
-            ESP_LOGW(TAG, "Memory leak detected: dropped %zu bytes in 30s (from %zu to %zu)",
-                     heap_drop, previous_free_heap, current_free_heap);
-            leak_detection_count++;
+            size_t heap_drop = previous_free_heap - current_free_heap;
+
+            // Only count drops > 1KB as significant (filters out normal fluctuations)
+            if (heap_drop > 1024)
+            {
+                consecutive_drops++;
+                ESP_LOGD(TAG, "Heap dropped %zu bytes (consecutive: %d)", heap_drop, consecutive_drops);
+
+                // Only report as leak if we see 3+ consecutive drops
+                if (consecutive_drops >= 3)
+                {
+                    size_t total_loss = baseline_heap - current_free_heap;
+                    ESP_LOGW(TAG, "Potential memory leak: %d consecutive drops, total loss %zu bytes (baseline %zu -> %zu)",
+                             consecutive_drops, total_loss, baseline_heap, current_free_heap);
+                    leak_detection_count++;
+
+                    // Reset baseline to current for tracking future trends
+                    baseline_heap = current_free_heap;
+                    consecutive_drops = 0;
+                }
+            }
+            else
+            {
+                // Small drop (<1KB) - likely just normal operation, reset counter
+                consecutive_drops = 0;
+            }
+        }
+        else
+        {
+            // Heap increased or stayed same - reset counter and update baseline
+            if (consecutive_drops > 0)
+            {
+                ESP_LOGD(TAG, "Heap recovered: %zu bytes (was dropping for %d checks)",
+                         current_free_heap - previous_free_heap, consecutive_drops);
+            }
+            consecutive_drops = 0;
+
+            // Update baseline if heap recovered significantly
+            if (current_free_heap > baseline_heap)
+            {
+                baseline_heap = current_free_heap;
+            }
         }
     }
 

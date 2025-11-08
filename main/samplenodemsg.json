@@ -1,10 +1,11 @@
 {
     "magic": 3203391147,
-    "type": "node_data",
-    "node_id": "2",
-    "seq_num": 42,
+    "type": "connect",
+    "node_id": 2,
+    "seq_num": 1,
     "timestamp": 1693550000,
-    "status": "online",
+    "controller": 1,
+    "sw_version": "1.0.3",
     "sensors": [
         "temperature",
         "humidity",
@@ -14,7 +15,15 @@
     "services": [
         "diagnostics",
         "ota"
-    ],
+    ]
+}
+
+{
+    "magic": 3203391147,
+    "type": "node_data",
+    "node_id": 2,
+    "seq_num": 42,
+    "timestamp": 1693550000,
     "payload": [
         {
             "type": "sensor",
@@ -30,16 +39,52 @@
                 "uptime_sec": 123456,
                 "free_heap": 20480,
                 "rssi": -65,
-                "error_code": 0,
-                "info": "No issues detected"
+                "error_code": 0
             }
         },
         {
             "type": "ota_status",
             "ota_status": {
-                "status_code": 1,
-                "message": "OTA update successful"
+                "status": "idle",
+                "progress": 0
             }
         }
     ]
+}
+
+{
+    "magic": 3203391147,
+    "type": "node_event",
+    "node_id": 2,
+    "seq_num": 43,
+    "timestamp": 1693550010,
+    "payload": {
+        "event_type": "EVENT_DOOR",
+        "doorsense_1": "OPEN",
+        "doorsense_2": "CLOSED"
+    }
+}
+
+{
+    "magic": 3203391147,
+    "type": "node_event",
+    "node_id": 0,
+    "seq_num": 15,
+    "timestamp": 1693550020,
+    "payload": {
+        "event_type": "EVENT_DOOR",
+        "doorsense": [
+            "OPEN",
+            "CLOSED",
+            "UNKNOWN"
+        ]
+    }
+}
+
+{
+    "magic": 3203391147,
+    "type": "disconnect_request",
+    "node_id": 2,
+    "seq_num": 99,
+    "timestamp": 1693560000
 }

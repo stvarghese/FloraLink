@@ -60,7 +60,9 @@
 			"webserver.h": "c",
 			"rmt_rx.h": "c",
 			"nodeio_lut.h": "c",
-			"ledc.h": "c"
+			"ledc.h": "c",
+			"freertos.h": "c",
+			"onboardled.h": "c"
 		},
 		"powershell.cwd": "FloraLink"
 	}

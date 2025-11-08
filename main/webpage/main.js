@@ -34,14 +34,17 @@ function loadPersistedState() {
     try {
         const nt = localStorage.getItem('nodeTimes');
         const kn = localStorage.getItem('knownNodes');
+        const cn = localStorage.getItem('clearedNodes');
         if (nt && !window.nodeTimes) window.nodeTimes = JSON.parse(nt);
         if (kn && !window.knownNodes) window.knownNodes = JSON.parse(kn);
+        if (cn && !window.clearedNodes) window.clearedNodes = JSON.parse(cn);
     } catch (_) { /* ignore */ }
 }
 function savePersistedState() {
     try {
         if (window.nodeTimes) localStorage.setItem('nodeTimes', JSON.stringify(window.nodeTimes));
         if (window.knownNodes) localStorage.setItem('knownNodes', JSON.stringify(window.knownNodes));
+        if (window.clearedNodes) localStorage.setItem('clearedNodes', JSON.stringify(window.clearedNodes));
     } catch (_) { /* ignore */ }
 }
 
@@ -109,11 +112,32 @@ async function fetchNodes() {
     if (Object.values(window.configPanelsOpen).some(Boolean)) return;
 
     loadPersistedState();
+
+    // Auto-cleanup: Remove nodes that have been offline for more than 24 hours
+    const AUTO_CLEANUP_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
+    const nowTs = Date.now();
+    if (window.knownNodes) {
+        for (const idStr of Object.keys(window.knownNodes)) {
+            const id = parseInt(idStr, 10);
+            const node = window.knownNodes[id];
+            const nt = window.nodeTimes[id];
+            if (node && node.status === 'Offline' && nt && nt.offlineSince) {
+                const offlineDuration = nowTs - nt.offlineSince;
+                if (offlineDuration > AUTO_CLEANUP_THRESHOLD_MS) {
+                    delete window.knownNodes[id];
+                    delete window.nodeTimes[id];
+                }
+            }
+        }
+        savePersistedState();
+    }
+
     fetch('/nodeslist')
         .then(r => r.json())
         .then(async nodes => {
             if (!window.nodeTimes) window.nodeTimes = {};
             if (!window.knownNodes) window.knownNodes = {};
+            if (!window.clearedNodes) window.clearedNodes = {};
 
             const nowTs = Date.now();
             const presentIds = new Set();
@@ -121,6 +145,18 @@ async function fetchNodes() {
 
             if (Array.isArray(nodes)) {
                 nodes.forEach(node => {
+                    // Skip nodes that were manually cleared
+                    if (window.clearedNodes[node.id]) {
+                        // If a cleared node comes back online, remove it from cleared list
+                        if (node.status === 'Online') {
+                            delete window.clearedNodes[node.id];
+                            savePersistedState();
+                        } else {
+                            // Still offline and cleared, skip it
+                            return;
+                        }
+                    }
+
                     presentIds.add(node.id);
                     const nt = window.nodeTimes[node.id] || {};
                     if (!nt.firstSeen) nt.firstSeen = nowTs;
@@ -149,15 +185,31 @@ async function fetchNodes() {
             if (!window._flut_cache_promise) {
                 window._flut_cache_promise = fetch('/luts').then(r => r.json()).catch(() => null);
             }
+            // Fetch door map (names) as well
+            if (!window._door_map_cache_promise) {
+                window._door_map_cache_promise = fetch('/door_map').then(r => r.json()).catch(() => null);
+            }
             try {
                 // resolve synchronously via then; this keeps the surrounding code non-async
                 _luts = await window._flut_cache_promise;
             } catch (e) {
                 _luts = null;
             }
+            // Resolve door map into a simple array cache
+            try {
+                const _dm = await window._door_map_cache_promise;
+                if (_dm && Array.isArray(_dm.doors)) window.doorMap = _dm.doors;
+                else window.doorMap = null;
+            } catch (e) {
+                window.doorMap = null;
+            }
             if (Array.isArray(nodes)) combined.push(...nodes);
             for (const idStr of Object.keys(window.knownNodes)) {
                 const id = parseInt(idStr, 10);
+                // Skip cleared nodes
+                if (window.clearedNodes && window.clearedNodes[id]) {
+                    continue;
+                }
                 if (!presentIds.has(id)) {
                     const last = window.knownNodes[id];
                     const nt = window.nodeTimes[id] || {};
@@ -271,9 +323,57 @@ async function fetchNodes() {
                             // Render each category as its own row
                             Object.keys(grouped).forEach(cat => {
                                 const keys = grouped[cat];
-                                const title = (cat === 'doorsense') ? 'Doors' : lutNameToLabel(cat);
-                                const parts = keys.map(k => `${k} = ${formatEventValue(flat[k])}`);
-                                html += `<div class='event-row event-${cat}'>${title}: ${parts.join(', ')}</div>`;
+                                if (cat === 'doorsense') {
+                                    // Special rendering for doors - one line per door with icon
+                                    const doorIcon = '🚪';
+
+                                    // Determine which doors are configured (have mappings) vs just available
+                                    // Show all configured doors even if no event received yet
+                                    const maxDoorIndex = Math.max(...keys.map(k => {
+                                        const m = k.match(/^doorsense_(\d+)$/);
+                                        return m ? parseInt(m[1], 10) : -1;
+                                    }).filter(idx => idx >= 0));
+
+                                    // Build a set of doors we've received events for
+                                    const receivedDoors = new Set();
+                                    keys.forEach(k => {
+                                        const m = k.match(/^doorsense_(\d+)$/);
+                                        if (m) receivedDoors.add(parseInt(m[1], 10));
+                                    });
+
+                                    // Only show doors that have actually received events
+                                    const doorIndicesToShow = Array.from(receivedDoors).sort((a, b) => a - b);
+
+                                    doorIndicesToShow.forEach(idx => {
+                                        const mappedName = (window.doorMap && window.doorMap[idx] && window.doorMap[idx].trim())
+                                            ? window.doorMap[idx].trim()
+                                            : null;
+                                        const friendly = mappedName || ('Door ' + idx);
+                                        const k = `doorsense_${idx}`;
+
+                                        // We have received an event for this door - show definitive state
+                                        const state = formatEventValue(flat[k]);
+                                        const stateColor = (state === 'OPEN') ? '#f57c00' : '#388e3c';
+                                        const stateIcon = (state === 'OPEN') ? '🔓' : '🔒';
+                                        html += `<div class='door-status' style='margin-top:6px; padding:6px 10px; background:#f8f9fa; border-radius:6px; display:flex; align-items:center; justify-content:space-between;'>
+                                                    <span style='display:flex; align-items:center; gap:8px;'>
+                                                        <span style='font-size:1.2em;'>${doorIcon}</span>
+                                                        <span style='font-weight:500; color:#333;'>${friendly}</span>
+                                                    </span>
+                                                    <span style='display:flex; align-items:center; gap:6px; font-weight:600; color:${stateColor};'>
+                                                        <span style='font-size:1.1em;'>${stateIcon}</span>
+                                                        <span>${state}</span>
+                                                    </span>
+                                                </div>`;
+                                    });
+                                } else {
+                                    // Other event categories - single line with title
+                                    const title = lutNameToLabel(cat);
+                                    const parts = keys.map(k => {
+                                        return `${k} = ${formatEventValue(flat[k])}`;
+                                    });
+                                    html += `<div class='event-row event-${cat}'>${title}: ${parts.join(', ')}</div>`;
+                                }
                             });
                         }
                     } catch (e) { /* ignore render errors */ }
@@ -432,22 +532,27 @@ async function fetchNodes() {
             const clearBtn = panel.querySelector('#clearOfflineBtn');
             if (clearBtn) {
                 clearBtn.addEventListener('click', () => {
-                    // Remove offline nodes from state and persisted storage BEFORE animation
-                    for (const idStr of Object.keys(window.knownNodes)) {
-                        const id = parseInt(idStr, 10);
-                        const node = window.knownNodes[id];
-                        if (node && node.status === 'Offline') {
-                            delete window.knownNodes[id];
-                            delete window.nodeTimes[id];
-                        }
-                    }
-                    savePersistedState();
-                    // Find all offline cards
+                    // Initialize clearedNodes if needed
+                    if (!window.clearedNodes) window.clearedNodes = {};
+
+                    // Find all offline cards and get their node IDs
                     const offlineCards = Array.from(panel.querySelectorAll('.node-card.offline'));
+
+                    offlineCards.forEach(card => {
+                        const nodeId = parseInt(card.dataset.nodeid, 10);
+                        if (!isNaN(nodeId)) {
+                            window.clearedNodes[nodeId] = true;
+                            delete window.knownNodes[nodeId];
+                            delete window.nodeTimes[nodeId];
+                        }
+                    });
+
+                    savePersistedState();
+
+                    // Animate cards away sequentially
                     let i = 0;
                     function swipeNext() {
                         if (i >= offlineCards.length) {
-                            setTimeout(fetchNodes, 400); // Wait for animation to finish
                             return;
                         }
                         const card = offlineCards[i];

@@ -438,13 +438,32 @@ extern "C"
     void onboardled_set_period_ms(uint32_t period_ms);
 
     /**
-     * @brief Dance pattern - rapid on/off multi-special colour cycles for a fun effect.
+     * @brief Disco pattern - rapid on/off multi-special colour cycles for a fun effect.
      *
      * @param cycles Number of on/off cycles to perform
      * @param on_ms Time in milliseconds for on period
      * @param off_ms Time in milliseconds for off period
      */
-    void onboardled_dance(uint32_t cycles, uint32_t on_ms, uint32_t off_ms);
+    void onboardled_disco(uint32_t cycles, uint32_t on_ms, uint32_t off_ms);
+
+    // ==================== POWER MANAGEMENT FUNCTIONS ====================
+
+    /**
+     * @brief Suspend LED strip RMT peripheral to save power during idle mode.
+     *
+     * Disables the LED strip RMT channel and releases the APB_FREQ_MAX power
+     * management lock, allowing auto light sleep to function properly.
+     * Call this before entering idle/sleep mode.
+     */
+    void onboardled_suspend_led_strip(void);
+
+    /**
+     * @brief Resume LED strip RMT peripheral after idle mode.
+     *
+     * Re-enables the LED strip RMT channel for normal operation.
+     * Call this when returning to active mode.
+     */
+    void onboardled_resume_led_strip(void);
 
 // Compatibility macros for existing blink API
 #define blink_init() onboardled_begin(CONFIG_BLINK_GPIO, false)

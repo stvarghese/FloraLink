@@ -31,11 +31,22 @@ This document defines the NodeIO protocol, a JSON-over-WebSocket communication p
 ## 2. Message Structure
 
 ### 2.1 Base Message Envelope
-All messages MUST contain these fields:
+All **node → hub** messages MUST contain these fields:
 
 ```json
 {
     "magic": 3203391147,        // Protocol validation (0xBEEFBEEF)
+    "type": "message_type",     // Message type identifier
+    "node_id": 0,              // Node identifier (0-7)
+    "seq_num": 1,              // Sequence number (monotonic)
+    "timestamp": 1733333333     // Unix epoch timestamp
+}
+```
+
+**Hub → node** messages omit the `magic` field in the current implementation:
+
+```json
+{
     "type": "message_type",     // Message type identifier
     "node_id": 0,              // Node identifier (0-7)
     "seq_num": 1,              // Sequence number (monotonic)
@@ -50,6 +61,7 @@ All messages MUST contain these fields:
 - **Value**: 3203391147 (0xBEEFBEEF)
 - **Purpose**: Protocol validation and version identification
 - **Validation**: Messages with incorrect magic MUST be rejected
+- **Direction**: Required for node → hub, omitted for hub → node
 
 #### 2.2.2 Message Type
 - **Type**: string
@@ -58,7 +70,7 @@ All messages MUST contain these fields:
 - **Validation**: Unknown types SHOULD trigger error response
 
 #### 2.2.3 Node ID
-- **Type**: uint8 (JSON number)
+- **Type**: uint8 (JSON number, not string)
 - **Range**: 0-7 (inclusive)
 - **Purpose**: Unique identifier for node within session
 - **Validation**: Out-of-range values MUST be rejected
@@ -237,52 +249,61 @@ Format notes:
 - `node_event` messages use the same base envelope (see Section 2.1).
 - Unlike `node_data` (an array), `node_event` carries a single JSON object in `payload` describing the event.
 - A required string field `event_type` indicates the event kind (e.g. `"EVENT_DOOR"`).
-- Event-specific fields are encoded as named properties within the `payload` object (for arrays of per-element values the naming convention is `<name>_0`, `<name>_1`, ...).
+- Event-specific fields are encoded as named properties within the `payload` object.
+- Supports two formats: per-index keys (`doorsense_N`) or array (`doorsense: [...]`)
 
-Example: multiple door events
+**Format 1: Per-index keys** (recommended for sparse events):
 ```json
 {
     "magic": 3203391147,
     "type": "node_event",
-    "node_id": 1,
+    "node_id": 2,
     "seq_num": 42,
     "timestamp": 12345678,
     "payload": {
         "event_type": "EVENT_DOOR",
-        "door_state_0": "OPEN",
-        "door_state_1": "CLOSE",
-        "door_state_2": "OPEN"
+        "doorsense_1": "OPEN",
+        "doorsense_2": "CLOSED"
     }
 }
 ```
 
-Example: single door event
+**Format 2: Array** (all indices):
 ```json
 {
     "magic": 3203391147,
     "type": "node_event",
-    "node_id": 1,
+    "node_id": 0,
     "seq_num": 43,
     "timestamp": 12345679,
     "payload": {
         "event_type": "EVENT_DOOR",
-        "door_state_0": "CLOSE"
+        "doorsense": ["OPEN", "CLOSED", "UNKNOWN"]
     }
 }
 ```
 
-Rules and hub behavior (current implementation)
+**Legacy alias**: The hub also accepts `door_state` and `door_state_N` as aliases for `doorsense`.
+
+**Rules and hub behavior (current implementation)**:
 - The hub expects `event_type` to be a string and dispatches handling based on that value.
-- For `EVENT_DOOR` the hub looks up a sensor LUT entry named `"door_state"` (this LUT describes capability flag, element count and whether the field is sporadic).
+- For `EVENT_DOOR` the hub looks up a sensor LUT entry named `"doorsense"` (this LUT describes capability flag, element count and whether the field is sporadic).
 - The hub will only accept and persist an event if the node advertises the corresponding capability (the node's capability mask contains the LUT flag).
 - The hub will also verify the LUT declares the field as sporadic (FIELD_LOC_SPORADIC). If the LUT does not mark the field sporadic, the event is rejected.
-- Door-state elements are clamped to the LUT-declared `elem_count`. Missing elements are treated as "unknown"; string values like `"OPEN"`/`"CLOSE"` or numeric values are accepted and normalized by the hub.
+- Door ownership: Each door index (0-2) can only be owned by one node. The first node to send an event for a door index claims ownership. Subsequent events from other nodes for that door are rejected with a warning.
+- Door-state elements are clamped to the LUT-declared `elem_count` (NUM_DOOR_SENSORS = 3). Missing elements are treated as "unknown"; string values like `"OPEN"`/`"CLOSED"` or numeric values (1/0) are accepted and normalized by the hub.
 - Sporadic/event writes are stored in the message's `sporadic_data` area (separate from the periodic payload array) so incoming events do not overwrite periodic `node_data` slots.
 
-Notes on acceptance policy
+**Door ownership and display**:
+- Each door index can only be claimed by one node
+- Nodes should only send events for door indices they own
+- The hub publishes door states per-node (each node's `/nodeslist` entry contains only its owned doors)
+- Frontend displays doors only on the owning node's card
+
+**Notes on acceptance policy**:
 - The hub accepts `node_event` messages based on the node's advertised capability mask: if the node claims the capability (the capability flag in its connect message), the hub will parse and persist the event (subject to LUT validation). The hub does not require a separate server-side subscription mask to accept event payloads. This keeps the hub implementation simple and relies on the node to only send events for which the hub previously requested delivery via the subscription handshake.
 
-Extensibility
+**Extensibility**:
 - Add new event types by defining an `event_type` string and a corresponding LUT entry for the event's named fields (name, capability flag, elem_count, and `FIELD_LOC_SPORADIC` if appropriate). Update both node and hub LUTs so parsing/serialization remain in sync.
 
 ### 3.4 Service Messages
@@ -342,7 +363,8 @@ typedef enum {
     CAP_LED = 1 << 5,           // LED actuator
     CAP_BUZZER = 1 << 6,        // Buzzer actuator
     CAP_DIAG = 1 << 7,          // Diagnostic services
-    CAP_OTA = 1 << 8            // OTA update capability
+    CAP_OTA = 1 << 8,           // OTA update capability
+    CAP_DOORSENSE = 1 << 9      // Door sensor (sporadic events)
 } capability_flag_t;
 ```
 
@@ -377,6 +399,15 @@ typedef enum {
 - **Type**: float
 - **Range**: 0 to 1023 (10-bit ADC) or 0 to 65535 (lux)
 - **Precision**: 1 count or 1 lux
+
+#### 4.3.6 Door Sensor (Sporadic)
+- **Unit**: State (OPEN/CLOSED/UNKNOWN)
+- **Type**: string or numeric (1=OPEN, 0=CLOSED, 255=UNKNOWN)
+- **Indices**: 0 to 2 (NUM_DOOR_SENSORS = 3)
+- **Delivery**: Event-driven via `node_event` message type
+- **Ownership**: Each door index can only be claimed by one node (first-come, first-served)
+- **Format**: Per-index keys (`doorsense_0`, `doorsense_1`, `doorsense_2`) or array (`doorsense: ["OPEN", "CLOSED", "UNKNOWN"]`)
+- **Legacy alias**: `door_state` accepted as equivalent to `doorsense`
 
 ### 4.4 Diagnostic Data Types
 

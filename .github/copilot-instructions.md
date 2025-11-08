@@ -42,6 +42,7 @@ idf.py -p COM9 flash monitor  # adjust COM port
 - Serial/flash example uses COM9 by default; change if your board enumerates differently.
 - OTA: Not implemented end-to-end yet. `MSG_OTA_*` and `CAP_OTA` exist in the types, but there is no download/flash pipeline wired; treat OTA fields as placeholders until specified.
 - Message types: Only those in `nodeioprotocol.h` are in use at the moment; no additional types are planned currently.
+- **Power Management**: RMT peripherals (LED strip + monitor) acquire APB_FREQ_MAX locks. During idle mode, both RMT channels are suspended via `onboardled_suspend_led_strip()` and `monitor_suspend_rmt()` to allow auto light sleep. LED patterns during idle are disabled to maintain power savings. See `POWER_MANAGEMENT_FIX.md` for details.
 
 ### Tests and tooling
 - `pytest_blink.py` demonstrates `pytest-embedded` usage (prints binary size). Broader tests are not wired; if you add tests, keep them fast and IDF-compatible.

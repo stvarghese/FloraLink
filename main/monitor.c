@@ -44,6 +44,9 @@ static void *g_rx_buf = NULL;
 static size_t g_rx_buf_sz = 0;
 static rmt_receive_config_t g_rx_cfg;
 
+// State tracking for RMT suspend/resume
+static bool s_rmt_enabled = false;
+
 // --- CPU load estimator ---
 static uint64_t s_idle_count = 0;
 static uint64_t s_last_idle_count = 0;
@@ -228,6 +231,7 @@ void monitor_init(void)
     // 7. Enable and arm RMT
     rmt_enable(g_rx_chan);
     rmt_receive(g_rx_chan, g_rx_buf, g_rx_buf_sz, &g_rx_cfg);
+    s_rmt_enabled = true; // Track state
     // 8. Create event queue (task is created in tasks.c)
     s_rmt_evt_q = xQueueCreate(10, sizeof(rmt_rx_done_event_data_t));
 }
@@ -240,7 +244,7 @@ void monitor_init(void)
  */
 void monitor_suspend_rmt(void)
 {
-    if (g_rx_chan)
+    if (g_rx_chan && s_rmt_enabled)
     {
         ESP_LOGI(TAG, "Suspending RMT monitoring for power savings");
         esp_err_t ret = rmt_disable(g_rx_chan);
@@ -248,6 +252,14 @@ void monitor_suspend_rmt(void)
         {
             ESP_LOGW(TAG, "Failed to disable RMT channel: %s", esp_err_to_name(ret));
         }
+        else
+        {
+            s_rmt_enabled = false;
+        }
+    }
+    else if (!s_rmt_enabled)
+    {
+        ESP_LOGD(TAG, "RMT already suspended, skipping");
     }
 }
 
@@ -259,7 +271,7 @@ void monitor_suspend_rmt(void)
  */
 void monitor_resume_rmt(void)
 {
-    if (g_rx_chan)
+    if (g_rx_chan && !s_rmt_enabled)
     {
         ESP_LOGI(TAG, "Resuming RMT monitoring");
         esp_err_t ret = rmt_enable(g_rx_chan);
@@ -269,11 +281,17 @@ void monitor_resume_rmt(void)
             return;
         }
 
+        s_rmt_enabled = true;
+
         // Re-arm for reception
         ret = rmt_receive(g_rx_chan, g_rx_buf, g_rx_buf_sz, &g_rx_cfg);
         if (ret != ESP_OK)
         {
             ESP_LOGW(TAG, "Failed to restart RMT reception: %s", esp_err_to_name(ret));
         }
+    }
+    else if (s_rmt_enabled)
+    {
+        ESP_LOGD(TAG, "RMT already enabled, skipping");
     }
 }

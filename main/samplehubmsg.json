@@ -1,6 +1,6 @@
 {
-    "magic": 305419896,
-    "type": "subscribe",
+    "magic": 3203391147,
+    "type": "notify_subscription",
     "node_id": 1,
     "seq_num": 42,
     "timestamp": 1725974400,
@@ -15,13 +15,13 @@
                 "diagnostics"
             ]
         },
-        "interval": 1000
+        "interval": 5000
     }
 }
 
 {
-    "magic": 305419896,
-    "type": "subscribe",
+    "magic": 3203391147,
+    "type": "notify_subscription",
     "node_id": 1,
     "seq_num": 43,
     "timestamp": 1725974401,
@@ -41,15 +41,25 @@
 {
     "type": "error",
     "node_id": 1,
-    "message": "Invalid protocol magic"
+    "seq_num": 45,
+    "timestamp": 1725974403,
+    "payload": {
+        "error_code": 400,
+        "message": "Invalid protocol magic"
+    }
 }
 
 {
-    "type": "heartbeat_ack",
-    "node_id": 1
+    "magic": 3203391147,
+    "type": "heartbeat",
+    "node_id": 1,
+    "seq_num": 46,
+    "timestamp": 1725974404
 }
 
 {
-    "type": "diag_request",
-    "node_id": 1
+    "type": "diagnostic_request",
+    "node_id": 1,
+    "seq_num": 47,
+    "timestamp": 1725974405
 }

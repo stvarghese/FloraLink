@@ -314,14 +314,14 @@ esp_err_t wifi_setup(void)
     }
     else
     {
-        // return wifi_setup_ap_mode();
+        return wifi_setup_ap_mode();
         // Temporarily use default credentials for testing
-        const char *default_ssid = "TheDecoRated";
-        const char *default_password = "N0freeloading";
-        strncpy((char *)wifi_config.sta.ssid, default_ssid, sizeof(wifi_config.sta.ssid));
-        strncpy((char *)wifi_config.sta.password, default_password, sizeof(wifi_config.sta.password));
-        wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-        ESP_LOGW(TAG, "No WiFi credentials in NVM. Using default credentials. Press and hold the WiFi reset button for 3 seconds to enter AP mode.");
+        // const char *default_ssid = "TheDecoRated";
+        // const char *default_password = "N0freeloading";
+        // strncpy((char *)wifi_config.sta.ssid, default_ssid, sizeof(wifi_config.sta.ssid));
+        // strncpy((char *)wifi_config.sta.password, default_password, sizeof(wifi_config.sta.password));
+        // wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+        // ESP_LOGW(TAG, "No WiFi credentials in NVM. Using default credentials. Press and hold the WiFi reset button for 3 seconds to enter AP mode.");
     }
 
     // Copy SSID to global variable for webserver use

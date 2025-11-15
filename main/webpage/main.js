@@ -277,6 +277,71 @@ async function fetchNodes() {
                     html += `</div>`;
                     html += `<div class='node-uptime'>Uptime: ${uptime}</div>`;
 
+                    // --- Lifecycle tracking info ---
+                    // Only display anomaly info if we've received at least one anomaly
+                    if (node.anomaly_count != null && node.anomaly_count > 0) {
+                        const reason = node.last_anomaly_reason || 'unknown';
+                        const refreshes = node.last_anomaly_refreshes || 0;
+
+                        // Format reason for display
+                        let reasonText = reason.replace(/_/g, ' ');
+                        reasonText = reasonText.charAt(0).toUpperCase() + reasonText.slice(1);
+
+                        // Severity indicator based on refresh count
+                        let severity = '⚠️';
+                        let severityClass = 'lifecycle-anomaly';
+                        if (refreshes > 30) {
+                            severity = '🔴';
+                            severityClass = 'lifecycle-anomaly critical';
+                        } else if (refreshes > 20) {
+                            severity = '⚠️';
+                            severityClass = 'lifecycle-anomaly warning';
+                        }
+
+                        html += `<div class='${severityClass}'>${severity} `;
+                        if (node.anomaly_count === 1) {
+                            html += `Device stayed awake ${refreshes}× longer than expected`;
+                        } else {
+                            html += `${node.anomaly_count} anomalies detected`;
+                        }
+                        html += `<div class='lifecycle-detail'>Cause: ${reasonText} (${refreshes} activity refreshes)</div>`;
+                        html += `</div>`;
+                    }
+
+                    // Only display wake info if we've received at least one wake event
+                    if (node.last_wake_source != null && node.last_wake_source !== '') {
+                        const source = node.last_wake_source;
+                        const prevSleep = node.prev_sleep || 0;
+                        const prevUp = node.prev_uptime || 0;
+
+                        // Format wake source
+                        let sourceIcon = '💤';
+                        let sourceText = source.replace(/_/g, ' ');
+                        sourceText = sourceText.charAt(0).toUpperCase() + sourceText.slice(1);
+
+                        // Choose icon based on source
+                        if (source.includes('door')) sourceIcon = '🚪';
+                        else if (source.includes('button')) sourceIcon = '🔘';
+                        else if (source.includes('scheduled')) sourceIcon = '⏰';
+                        else if (source.includes('ws_message')) sourceIcon = '📡';
+                        else if (source.includes('boot')) sourceIcon = '🔌';
+
+                        // Format durations
+                        const formatDuration = (seconds) => {
+                            if (seconds === 0) return 'N/A';
+                            if (seconds < 60) return `${seconds}s`;
+                            const mins = Math.floor(seconds / 60);
+                            const secs = seconds % 60;
+                            return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+                        };
+
+                        html += `<div class='lifecycle-info'>${sourceIcon} Woke from ${sourceText}`;
+                        if (prevSleep > 0 || prevUp > 0) {
+                            html += ` • Slept ${formatDuration(prevSleep)} • Previously up ${formatDuration(prevUp)}`;
+                        }
+                        html += `</div>`;
+                    }
+
                     // --- Event / sporadic rows (doors, alerts, etc.) ---
                     try {
                         const sporadic = node.sporadic || {};
@@ -383,8 +448,11 @@ async function fetchNodes() {
                     html += `<div class='node-uptime'>Last Uptime: ${lastUptime}</div>`;
                 }
                 if (online) {
-                    // Configure expander
+                    // Configure expander and View Logs button
+                    html += `<div style='display:flex; gap:8px; margin-top:12px;'>`;
                     html += `<button class='node-config-toggle' data-node='${node.id}'>Configure</button>`;
+                    html += `<button class='node-logs-btn' data-node='${node.id}'>View Logs</button>`;
+                    html += `</div>`;
                     // Inline config panel (hidden by default)
                     const capMask = Number(node.cap_mask || 0);
                     const subMask = Number(node.sub && node.sub.mask ? node.sub.mask : 0);
@@ -567,6 +635,14 @@ async function fetchNodes() {
                 });
             }
 
+            // Wire up View Logs buttons
+            panel.querySelectorAll('.node-logs-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const nodeId = btn.getAttribute('data-node');
+                    openLogsModal(nodeId);
+                });
+            });
+
             savePersistedState();
         })
         .catch(() => {
@@ -636,3 +712,196 @@ function updateSleepBanner() {
 }
 updateSleepBanner();
 setInterval(updateSleepBanner, 1000);
+
+// ========== Remote Logging Modal ==========
+
+// Create logs modal on first use
+function ensureLogsModal() {
+    let modal = document.getElementById('logsModal');
+    if (modal) return modal;
+
+    // Create modal structure
+    modal = document.createElement('div');
+    modal.id = 'logsModal';
+    modal.className = 'logs-modal';
+    modal.innerHTML = `
+        <div class='logs-modal-content'>
+            <div class='logs-modal-header'>
+                <h3 id='logsModalTitle'>Node Logs</h3>
+                <button class='logs-modal-close' id='closeLogsModal'>&times;</button>
+            </div>
+            <div class='logs-modal-body'>
+                <div id='logsLoadingStatus' style='text-align:center; padding:20px; color:#666;'>
+                    <span style='font-size:1.2em;'>⏳</span> Requesting logs...
+                </div>
+                <div id='logsContent' style='display:none;'></div>
+            </div>
+            <div class='logs-modal-footer'>
+                <button id='refreshLogsBtn'>Refresh</button>
+                <button id='exportLogsBtn'>Export</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    // Wire up close button
+    document.getElementById('closeLogsModal').addEventListener('click', closeLogsModal);
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeLogsModal();
+    });
+
+    return modal;
+}
+
+function openLogsModal(nodeId) {
+    const modal = ensureLogsModal();
+    const title = document.getElementById('logsModalTitle');
+    const loadingStatus = document.getElementById('logsLoadingStatus');
+    const logsContent = document.getElementById('logsContent');
+
+    // Store current node ID for refresh/export
+    modal.dataset.nodeId = nodeId;
+
+    // Update title
+    title.textContent = `Node ${nodeId} Logs`;
+
+    // Show loading, hide content
+    loadingStatus.style.display = 'block';
+    logsContent.style.display = 'none';
+    logsContent.innerHTML = '';
+
+    // Show modal
+    modal.style.display = 'flex';
+
+    // Request logs
+    requestNodeLogs(nodeId);
+
+    // Wire up refresh button
+    const refreshBtn = document.getElementById('refreshLogsBtn');
+    refreshBtn.onclick = () => {
+        loadingStatus.style.display = 'block';
+        logsContent.style.display = 'none';
+        requestNodeLogs(nodeId);
+    };
+
+    // Wire up export button
+    const exportBtn = document.getElementById('exportLogsBtn');
+    exportBtn.onclick = () => exportLogs(nodeId);
+}
+
+function closeLogsModal() {
+    const modal = document.getElementById('logsModal');
+    if (modal) modal.style.display = 'none';
+}
+
+function requestNodeLogs(nodeId, maxLines = 100) {
+    const loadingStatus = document.getElementById('logsLoadingStatus');
+    const logsContent = document.getElementById('logsContent');
+
+    fetch(`/api/request_logs?node_id=${nodeId}&max_lines=${maxLines}`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'ok') {
+                loadingStatus.innerHTML = `<span style='color:#666;'>Waiting for response from Node ${nodeId}...</span>`;
+                // Poll for logs (hub stores them temporarily)
+                pollForLogs(nodeId);
+            } else {
+                throw new Error(data.message || 'Request failed');
+            }
+        })
+        .catch(err => {
+            loadingStatus.innerHTML = `<span style='color:#d32f2f;'>❌ Error: ${err.message}</span>`;
+            setTimeout(() => {
+                loadingStatus.style.display = 'none';
+            }, 3000);
+        });
+}
+
+function pollForLogs(nodeId, attempts = 0) {
+    const maxAttempts = 20; // 10 seconds total (500ms intervals)
+    const loadingStatus = document.getElementById('logsLoadingStatus');
+    const logsContent = document.getElementById('logsContent');
+
+    if (attempts >= maxAttempts) {
+        loadingStatus.innerHTML = `<span style='color:#f57c00;'>⚠️ Timeout waiting for logs. Node may be offline or busy.</span>`;
+        return;
+    }
+
+    // Poll the hub for stored logs
+    fetch(`/api/get_node_logs?node_id=${nodeId}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'available' && data.logs && data.logs.length > 0) {
+                displayNodeLogs(nodeId, data.logs, data.total_lines);
+            } else if (data.status === 'pending') {
+                // Still waiting for node response, poll again
+                setTimeout(() => pollForLogs(nodeId, attempts + 1), 500);
+            } else {
+                // No logs yet, poll again
+                setTimeout(() => pollForLogs(nodeId, attempts + 1), 500);
+            }
+        })
+        .catch(err => {
+            loadingStatus.innerHTML = `<span style='color:#d32f2f;'>❌ Error fetching logs: ${err.message}</span>`;
+        });
+}
+
+function displayNodeLogs(nodeId, logs, totalLines) {
+    const loadingStatus = document.getElementById('logsLoadingStatus');
+    const logsContent = document.getElementById('logsContent');
+
+    loadingStatus.style.display = 'none';
+    logsContent.style.display = 'block';
+
+    let html = '<div class="logs-list">';
+
+    logs.forEach((log, idx) => {
+        const lineText = log.line || 'Empty log line';
+
+        // Simple display without color coding - just show the line as-is
+        html += `<div class='log-entry log-info'>
+                    <span class='log-index'>#${idx + 1}</span>
+                    <span class='log-message'>${escapeHtml(lineText)}</span>
+                 </div>`;
+    });
+
+    html += '</div>';
+    html += `<div style='margin-top:12px; padding:8px; background:#f0f4fa; border-radius:4px; text-align:center; font-size:0.9em; color:#666;'>
+                Showing ${logs.length} of ${totalLines} total lines
+             </div>`;
+
+    logsContent.innerHTML = html;
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function exportLogs(nodeId) {
+    const logsContent = document.getElementById('logsContent');
+    const logEntries = logsContent.querySelectorAll('.log-entry');
+
+    let text = `Node ${nodeId} Logs - Exported ${new Date().toLocaleString()}\n`;
+    text += '='.repeat(60) + '\n\n';
+
+    logEntries.forEach((entry, idx) => {
+        const message = entry.querySelector('.log-message').textContent;
+        text += `[${idx + 1}] ${message}\n`;
+    });
+
+    // Create download
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `node_${nodeId}_logs_${Date.now()}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+// Close modal with Escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeLogsModal();
+});

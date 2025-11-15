@@ -15,6 +15,8 @@ const char MSG_TYP_PING[] = "ping";
 const char MSG_TYP_PONG[] = "pong";
 const char MSG_TYP_DISCONNECT_REQUEST[] = "disconnect_request";
 const char MSG_TYP_ERROR[] = "error";
+const char MSG_TYP_LOG_REQUEST[] = "log_request";
+const char MSG_TYP_LOG_RESPONSE[] = "log_response";
 const char MSG_TYP_UNKNOWN[] = "unknown";
 
 const char MSG_PAYLOAD_TYPE_SENSOR[] = "sensor";

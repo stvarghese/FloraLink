@@ -370,3 +370,186 @@ button {
     color: #d32f2f;
     font-weight: 700;
 }
+
+/* Lifecycle tracking info */
+.lifecycle-anomaly {
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: #fff3cd;
+    border-left: 4px solid #f57c00;
+    border-radius: 4px;
+    color: #333;
+    font-size: 0.92em;
+    line-height: 1.4;
+}
+
+.lifecycle-anomaly.warning {
+    background: #fff3cd;
+    border-left-color: #f57c00;
+}
+
+.lifecycle-anomaly.critical {
+    background: #ffebee;
+    border-left-color: #d32f2f;
+}
+
+.lifecycle-detail {
+    margin-top: 4px;
+    font-size: 0.88em;
+    color: #666;
+    font-style: italic;
+}
+
+.lifecycle-info {
+    margin-top: 6px;
+    padding: 6px 12px;
+    background: #f0f4fa;
+    border-radius: 4px;
+    color: #555;
+    font-size: 0.88em;
+    line-height: 1.4;
+}
+
+/* ========== Logs Modal ========== */
+.logs-modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.logs-modal-content {
+    background: #fff;
+    border-radius: 12px;
+    width: 100%;
+    max-width: 700px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.logs-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 24px;
+    border-bottom: 2px solid #e3eaf3;
+}
+
+.logs-modal-header h3 {
+    margin: 0;
+    color: #1565c0;
+    font-size: 1.4em;
+}
+
+.logs-modal-close {
+    background: transparent;
+    border: none;
+    font-size: 2em;
+    color: #888;
+    cursor: pointer;
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    line-height: 1;
+}
+
+.logs-modal-close:hover {
+    color: #d32f2f;
+}
+
+.logs-modal-body {
+    padding: 20px 24px;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 300px;
+}
+
+.logs-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.log-entry {
+    display: grid;
+    grid-template-columns: 50px 1fr;
+    gap: 12px;
+    padding: 8px 12px;
+    background: #f8fafc;
+    border-radius: 6px;
+    font-size: 0.95em;
+    border-left: 4px solid #2196f3;
+}
+
+.log-entry.log-warning {
+    background: #fff3cd;
+    border-left-color: #f57c00;
+}
+
+.log-entry.log-error {
+    background: #ffebee;
+    border-left-color: #d32f2f;
+}
+
+.log-index {
+    color: #888;
+    font-family: monospace;
+    font-size: 0.85em;
+    font-weight: 600;
+}
+
+.log-time {
+    color: #666;
+    font-family: monospace;
+    font-size: 0.9em;
+}
+
+.log-level {
+    font-weight: 600;
+    font-size: 0.95em;
+}
+
+.log-entry.log-info .log-level {
+    color: #2196f3;
+}
+
+.log-entry.log-warning .log-level {
+    color: #f57c00;
+}
+
+.log-entry.log-error .log-level {
+    color: #d32f2f;
+}
+
+.log-message {
+    color: #333;
+    word-break: break-word;
+    font-family: monospace;
+    font-size: 0.9em;
+}
+
+.logs-modal-footer {
+    padding: 16px 24px;
+    border-top: 2px solid #e3eaf3;
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+}
+
+.logs-modal-footer button {
+    margin: 0;
+    padding: 8px 16px;
+}

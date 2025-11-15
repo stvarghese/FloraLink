@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <time.h>
 
 // --- Magic number ---
 #define PROTOCOL_MAGIC 0xBEEFBEEF
@@ -32,7 +33,8 @@ typedef enum
     CAP_BUZZER = 1 << 7,
     CAP_DIAG = 1 << 8,
     CAP_OTA = 1 << 9,
-    CAP_ALERT = 1 << 10
+    CAP_ALERT = 1 << 10,
+    CAP_REMOTE_LOGGING = 1 << 11 // Node supports remote log retrieval
     // max 32 bits
 } capability_flag_t;
 
@@ -63,6 +65,37 @@ typedef struct
     capability_t capability_mask;
     nodeio_state_t current_state;
     char sw_version[16];
+
+    // Network info (from alert code 101)
+    char ip_address[16];          // "192.168.68.111"
+    int rssi;                     // Signal strength in dBm (e.g., -64)
+    char ssid[33];                // WiFi network name
+    uint32_t last_network_update; // Timestamp of last network info update
+
+    // Firmware info (from alert code 100)
+    char firmware_version[16];     // "v1.0.0"
+    char firmware_build_date[32];  // "Nov 9 2025 15:30:45"
+    uint32_t last_firmware_update; // Timestamp of last firmware info update
+
+    // Remote logging storage (temporary, cleared after retrieval or timeout)
+    char **log_lines;     // Array of log line strings
+    uint16_t log_count;   // Number of lines stored
+    time_t log_timestamp; // When logs were received
+    bool logs_available;  // Flag indicating logs ready for retrieval
+
+    // Lifecycle tracking (from alert codes 102/104)
+    char last_wake_source[32];  // "door", "button", "scheduled", etc.
+    int expected_uptime_sec;    // Expected active duration (typically 30s)
+    int prev_sleep_sec;         // Previous sleep duration
+    int prev_uptime_sec;        // Previous active duration
+    time_t last_wake_timestamp; // When last wake alert received
+
+    // Anomaly tracking (from alert code 104)
+    int last_anomaly_uptime;       // Actual uptime when anomaly detected
+    char *last_anomaly_reason;     // What kept node awake (dynamically allocated)
+    int last_anomaly_refreshes;    // Activity refresh count
+    time_t last_anomaly_timestamp; // When anomaly detected
+    uint32_t anomaly_count;        // Total anomalies since connection
 } node_params_t;
 
 // --- Protocol message types ---
@@ -82,6 +115,8 @@ typedef struct
 #define MSG_PONG_VAL 0xAC
 #define MSG_DISCONNECT_REQUEST_VAL 0xAD
 #define MSG_ERROR_VAL 0xAE
+#define MSG_LOG_REQUEST_VAL 0x11
+#define MSG_LOG_RESPONSE_VAL 0x12
 #define MSG_UNKNOWN_VAL 0xAF
 
 typedef enum
@@ -101,6 +136,8 @@ typedef enum
     MSG_PONG = 0xAC,
     MSG_DISCONNECT_REQUEST = 0xAD,
     MSG_ERROR = 0xAE,
+    MSG_LOG_REQUEST = 0x11,
+    MSG_LOG_RESPONSE = 0x12,
     MSG_UNKNOWN = 0xAF
 } msg_type_t;
 
@@ -120,6 +157,8 @@ extern const char MSG_TYP_PING[];
 extern const char MSG_TYP_PONG[];
 extern const char MSG_TYP_DISCONNECT_REQUEST[];
 extern const char MSG_TYP_ERROR[];
+extern const char MSG_TYP_LOG_REQUEST[];
+extern const char MSG_TYP_LOG_RESPONSE[];
 extern const char MSG_TYP_UNKNOWN[];
 
 // --- JSON Type Strings for different payload types ---
@@ -201,8 +240,8 @@ typedef struct
 
 typedef enum
 {
-    SERVICE_EVENT_ALERT,
-    SERVICE_EVENT_OTA,
+    SERVICE_EVENT_ALERT = 0,
+    SERVICE_EVENT_OTA = 1,
     // Add more service event types as needed
 } service_event_type_t;
 
@@ -214,7 +253,7 @@ typedef struct
         struct
         {
             int alert_code;
-            char alert_message[64];
+            char alert_message[128]; // Alert messages can be up to 128 bytes
         } alert;
         struct
         {

@@ -26,8 +26,48 @@ MSG_PAYLOAD_TYPE_DIAGNOSTICS = "diagnostics"
 MSG_PAYLOAD_TYPE_OTA_STATUS = "ota_status"
 MSG_TYP_DISCONNECT_REQUEST = "disconnect_request"
 MSG_PAYLOAD_TYPE_EVENT = "event"
+MSG_TYP_LOG_REQUEST = "log_request"
+MSG_TYP_LOG_RESPONSE = "log_response"
+
+# Remote logging configuration
+LOG_BUFFER_SIZE = 100  # Number of log lines to keep
+LOG_ENTRY_LINE_LEN = 256  # Max characters per line
 
 SAMPLE_MSG_PATH = os.path.join(os.path.dirname(__file__), "..", "main", "samplenodemsg.json")
+
+class LogBuffer:
+    """Ring buffer for storing recent log lines (simulates node log capture)."""
+    def __init__(self, size=LOG_BUFFER_SIZE):
+        self.size = size
+        self.buffer = []
+        self.write_index = 0
+        
+    def add(self, line):
+        """Add a log line to the buffer."""
+        line = str(line)[:LOG_ENTRY_LINE_LEN]  # Truncate to max length
+        if len(self.buffer) < self.size:
+            self.buffer.append(line)
+        else:
+            self.buffer[self.write_index] = line
+            self.write_index = (self.write_index + 1) % self.size
+    
+    def get_logs(self, max_lines=None):
+        """Get logs in chronological order (oldest first)."""
+        if not self.buffer:
+            return []
+        
+        # If buffer not full, logs are already in order
+        if len(self.buffer) < self.size:
+            logs = self.buffer[:]
+        else:
+            # Buffer is full, need to reorder from write_index (oldest)
+            logs = self.buffer[self.write_index:] + self.buffer[:self.write_index]
+        
+        # Limit to max_lines if specified
+        if max_lines and max_lines < len(logs):
+            logs = logs[-max_lines:]  # Return most recent max_lines
+        
+        return logs
 
 def build_base_message(msg_type, node_id, seq_num):
     # Ensure node_id is numeric for strict backend parsing
@@ -39,7 +79,7 @@ def build_base_message(msg_type, node_id, seq_num):
         "controller": 2,  # CONTROLLER_ARDUINO
         "sw_version": "1.0.0",
         "sensors": ["temperature", "humidity", "moisture", "doorsense"],
-        "services": ["diagnostics", "ota"],
+        "services": ["diagnostics", "ota", "remote_logging"],
         "seq_num": seq_num,
         "timestamp": int(time.time()),
     }
@@ -107,12 +147,34 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
     """
 
     def log(msg):
+        # Add to log buffer
+        log_buffer.add(msg)
+        # Print to console if enabled
         if log_enabled.is_set():
             print(msg)
 
     websocket = None
     recv_task = None
     seq_num = 1
+    
+    # Create log buffer for this node
+    log_buffer = LogBuffer()
+    
+    # Simulate some initial boot logs
+    log_buffer.add(f"I (0) boot: ESP-IDF v4.4.6 2nd stage bootloader")
+    log_buffer.add(f"I (0) boot: Compile time: Jan 15 2025 12:34:56")
+    log_buffer.add(f"I (12) boot: Enabling RNG early entropy source...")
+    log_buffer.add(f"I (17) boot: SPI Speed: 40MHz")
+    log_buffer.add(f"I (22) boot: SPI Mode: DIO")
+    log_buffer.add(f"I (26) boot: SPI Flash Size: 4MB")
+    log_buffer.add(f"I (31) boot: Partition Table:")
+    log_buffer.add(f"I (34) boot: End of partition table")
+    log_buffer.add(f"I (43) esp_image: segment 0: Verified")
+    log_buffer.add(f"I (156) cpu_start: Pro cpu up.")
+    log_buffer.add(f"I (167) cpu_start: Starting scheduler on PRO CPU.")
+    log_buffer.add(f"I (0) cpu_start: Starting scheduler on APP CPU.")
+    log_buffer.add(f"I (234) main: FloraNode starting (node_id={node_id})...")
+    log_buffer.add(f"I (256) WiFi: Connecting to AP...")
 
     try:
         # === Connect phase ===
@@ -216,6 +278,39 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                                     control_event.clear()
                                     if log_enabled.is_set():
                                         print(f"[Node {node_id}] Unsubscribed by hub")
+
+                            # log_request: send log buffer contents
+                            elif mtype == "log_request":
+                                payload = msg_obj.get("payload", {})
+                                max_lines = payload.get("max_lines", LOG_BUFFER_SIZE)
+                                if log_enabled.is_set():
+                                    print(f"[Node {node_id}] Log request received (max_lines: {max_lines})")
+                                
+                                # Get logs from buffer
+                                logs = log_buffer.get_logs(max_lines)
+                                
+                                # Build response
+                                response = {
+                                    "magic": PROTOCOL_MAGIC,
+                                    "type": MSG_TYP_LOG_RESPONSE,
+                                    "node_id": int(node_id),
+                                    "seq_num": seq_num,
+                                    "timestamp": int(time.time()),
+                                    "payload": {
+                                        "total_lines": len(logs),
+                                        "logs": [{"line": line} for line in logs]
+                                    }
+                                }
+                                
+                                # Send response
+                                try:
+                                    await websocket.send(json.dumps(response))
+                                    seq_num += 1
+                                    if log_enabled.is_set():
+                                        print(f"[Node {node_id}] Sent {len(logs)} log lines to hub")
+                                except Exception as e:
+                                    if log_enabled.is_set():
+                                        print(f"[Node {node_id}] Failed to send log response: {e}")
 
                             # (poll_data handling intentionally omitted in this tester)
 

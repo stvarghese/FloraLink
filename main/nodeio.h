@@ -12,3 +12,9 @@ esp_err_t nodeio_update_subscription(uint8_t node_id, capability_t subscribe_mas
 
 // Get the number of currently connected nodes
 int nodeio_get_connected_node_count(void);
+
+// Get node parameters for a specific node (returns NULL if not found)
+node_params_t *nodeio_get_node_params(uint8_t node_id);
+
+// Request logs from a node (sends MSG_LOG_REQUEST)
+esp_err_t nodeio_request_logs(uint8_t node_id, uint16_t max_lines);

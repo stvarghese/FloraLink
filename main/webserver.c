@@ -314,6 +314,171 @@ static esp_err_t subscribe_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* HTTP POST handler for /api/request_logs?node_id=N */
+static esp_err_t request_logs_post_handler(httpd_req_t *req)
+{
+    modemanager_notify_activity_auto();
+
+    // Parse query string for node_id
+    char query[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK)
+    {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Missing node_id parameter\"}\n");
+        return ESP_OK;
+    }
+
+    char node_id_str[8];
+    if (httpd_query_key_value(query, "node_id", node_id_str, sizeof(node_id_str)) != ESP_OK)
+    {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Missing node_id parameter\"}\n");
+        return ESP_OK;
+    }
+
+    uint8_t node_id = (uint8_t)atoi(node_id_str);
+
+    // Optional: parse max_lines from query or POST body (default 300)
+    uint16_t max_lines = 300;
+    char max_lines_str[8];
+    if (httpd_query_key_value(query, "max_lines", max_lines_str, sizeof(max_lines_str)) == ESP_OK)
+    {
+        max_lines = (uint16_t)atoi(max_lines_str);
+    }
+
+    // Send log request to node
+    esp_err_t err = nodeio_request_logs(node_id, max_lines);
+    if (err != ESP_OK)
+    {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        char error_buf[128];
+        snprintf(error_buf, sizeof(error_buf),
+                 "{\"ok\":false,\"error\":\"%s\"}\n", esp_err_to_name(err));
+        httpd_resp_sendstr(req, error_buf);
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true,\"status\":\"requested\"}\n");
+    return ESP_OK;
+}
+
+/* HTTP GET handler for /api/get_node_logs?node_id=N */
+static esp_err_t get_node_logs_handler(httpd_req_t *req)
+{
+    modemanager_notify_activity_auto();
+
+    // Parse query string for node_id
+    char query[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK)
+    {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Missing node_id parameter\"}\n");
+        return ESP_OK;
+    }
+
+    char node_id_str[8];
+    if (httpd_query_key_value(query, "node_id", node_id_str, sizeof(node_id_str)) != ESP_OK)
+    {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Missing node_id parameter\"}\n");
+        return ESP_OK;
+    }
+
+    uint8_t node_id = (uint8_t)atoi(node_id_str);
+
+    // Get node params
+    node_params_t *p_node = nodeio_get_node_params(node_id);
+    if (!p_node)
+    {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Node not found\"}\n");
+        return ESP_OK;
+    }
+
+    // Check if logs are available
+    if (!p_node->logs_available || !p_node->log_lines || p_node->log_count == 0)
+    {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"pending\",\"message\":\"No logs available yet\"}\n");
+        return ESP_OK;
+    }
+
+    // Check timeout (clear logs after 60 seconds)
+    time_t now = time(NULL);
+    if ((now - p_node->log_timestamp) > 60)
+    {
+        // Clear expired logs
+        for (int i = 0; i < p_node->log_count; i++)
+        {
+            free(p_node->log_lines[i]);
+        }
+        free(p_node->log_lines);
+        p_node->log_lines = NULL;
+        p_node->log_count = 0;
+        p_node->logs_available = false;
+
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"expired\",\"message\":\"Logs have expired\"}\n");
+        return ESP_OK;
+    }
+
+    // Build JSON response with logs
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"available\",\"total_lines\":");
+
+    char num_buf[16];
+    snprintf(num_buf, sizeof(num_buf), "%d", p_node->log_count);
+    httpd_resp_sendstr(req, num_buf);
+    httpd_resp_sendstr(req, ",\"logs\":[");
+
+    for (int i = 0; i < p_node->log_count; i++)
+    {
+        if (i > 0)
+            httpd_resp_sendstr(req, ",");
+
+        httpd_resp_sendstr(req, "{\"line\":\"");
+
+        // Escape quotes and backslashes in log line
+        const char *line = p_node->log_lines[i];
+        for (const char *p = line; *p; p++)
+        {
+            if (*p == '"' || *p == '\\')
+            {
+                char esc[3] = {'\\', *p, '\0'};
+                httpd_resp_sendstr(req, esc);
+            }
+            else if (*p == '\n')
+            {
+                httpd_resp_sendstr(req, "\\n");
+            }
+            else if (*p == '\r')
+            {
+                httpd_resp_sendstr(req, "\\r");
+            }
+            else if (*p == '\t')
+            {
+                httpd_resp_sendstr(req, "\\t");
+            }
+            else
+            {
+                char ch[2] = {*p, '\0'};
+                httpd_resp_sendstr(req, ch);
+            }
+        }
+
+        httpd_resp_sendstr(req, "\"}");
+    }
+
+    httpd_resp_sendstr(req, "]}\n");
+    return ESP_OK;
+}
+
 /* HTTP POST handler for /configure */
 static esp_err_t configure_post_handler(httpd_req_t *req)
 {
@@ -723,6 +888,16 @@ esp_err_t webserver_init(void)
         .method = HTTP_POST,
         .handler = subscribe_post_handler,
         .user_ctx = NULL};
+    httpd_uri_t request_logs_post_uri = {
+        .uri = "/api/request_logs",
+        .method = HTTP_POST,
+        .handler = request_logs_post_handler,
+        .user_ctx = NULL};
+    httpd_uri_t get_node_logs_uri = {
+        .uri = "/api/get_node_logs",
+        .method = HTTP_GET,
+        .handler = get_node_logs_handler,
+        .user_ctx = NULL};
     httpd_uri_t sleepstatus_uri = {
         .uri = "/sleepstatus",
         .method = HTTP_GET,
@@ -774,6 +949,8 @@ esp_err_t webserver_init(void)
     httpd_register_uri_handler(server, &door_map_uri);
     httpd_register_uri_handler(server, &sleepstatus_uri);
     httpd_register_uri_handler(server, &subscribe_post_uri);
+    httpd_register_uri_handler(server, &request_logs_post_uri);
+    httpd_register_uri_handler(server, &get_node_logs_uri);
 
     // Static assets
     httpd_register_uri_handler(server, &css_uri);

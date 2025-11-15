@@ -160,6 +160,8 @@ static const type_map_t msg_type_map[] = {
     // {MSG_TYP_PONG, MSG_PONG},
     {MSG_TYP_DISCONNECT_REQUEST, MSG_DISCONNECT_REQUEST},
     {MSG_TYP_ERROR, MSG_ERROR},
+    {MSG_TYP_LOG_REQUEST, MSG_LOG_REQUEST},
+    {MSG_TYP_LOG_RESPONSE, MSG_LOG_RESPONSE},
     {MSG_TYP_UNKNOWN, MSG_UNKNOWN},
 };
 
@@ -432,6 +434,16 @@ static inline esp_err_t nodeio_parse_sporadic_event(protocol_msg_t *p_msg, cJSON
 {
     if (!p_msg || !msg_payload)
         return ESP_FAIL;
+
+    // Check for service alert format (alert_code + alert_message without event_type)
+    // Node may send alerts directly without wrapping in event_type
+    cJSON *alert_code_item = cJSON_GetObjectItem(msg_payload, "alert_code");
+    cJSON *alert_msg_item = cJSON_GetObjectItem(msg_payload, "alert_message");
+    if (alert_code_item && alert_msg_item && cJSON_IsNumber(alert_code_item) && cJSON_IsString(alert_msg_item))
+    {
+        // Direct alert format - parse via services LUT
+        return nodeio_set_service_lut_struct_from_json(p_msg, 0, "alert", msg_payload);
+    }
 
     cJSON *event_type_item = cJSON_GetObjectItem(msg_payload, "event_type");
     if (!event_type_item || !cJSON_IsString(event_type_item))
@@ -861,6 +873,221 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
                 node_contexts[node_id].p_msg_event = NULL;
             }
             node_contexts[node_id].p_msg_event = p_currentmsg;
+
+            // Check if this is an alert event and handle system alerts (codes 100-199)
+            if (p_currentmsg->payload.sporadic_data.current_cap_mask & CAP_ALERT)
+            {
+                int alert_code = p_currentmsg->payload.sporadic_data.datafields.service.data.alert.alert_code;
+                const char *alert_msg = p_currentmsg->payload.sporadic_data.datafields.service.data.alert.alert_message;
+
+                // Handle system alerts (100-199) - these provide node metadata
+                if (alert_code == 100)
+                {
+                    // Firmware info: "FW:v1.0.0 Build:Nov 9 2025 15:30:45"
+                    char fw_version[16] = {0};
+                    char fw_build[32] = {0};
+                    if (sscanf(alert_msg, "FW:%15s Build:%31[^\n]", fw_version, fw_build) == 2)
+                    {
+                        strncpy((*pp_node)->firmware_version, fw_version, sizeof((*pp_node)->firmware_version) - 1);
+                        strncpy((*pp_node)->firmware_build_date, fw_build, sizeof((*pp_node)->firmware_build_date) - 1);
+                        (*pp_node)->last_firmware_update = (uint32_t)time(NULL);
+                        ESP_LOGI(TAG, "Node %d firmware: %s (Built: %s)", node_id, fw_version, fw_build);
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "Node %d firmware info format error: %s", node_id, alert_msg);
+                    }
+                }
+                else if (alert_code == 101)
+                {
+                    // Network status: "IP:192.168.68.111 RSSI:-64 SSID:MyWiFiNetwork"
+                    char ip[16] = {0};
+                    int rssi = 0;
+                    char ssid[33] = {0};
+                    // Use a more flexible parser that captures everything after "SSID:"
+                    int matched = sscanf(alert_msg, "IP:%15s RSSI:%d SSID:%32[^\n]", ip, &rssi, ssid);
+                    if (matched >= 3)
+                    {
+                        strncpy((*pp_node)->ip_address, ip, sizeof((*pp_node)->ip_address) - 1);
+                        (*pp_node)->rssi = rssi;
+                        strncpy((*pp_node)->ssid, ssid, sizeof((*pp_node)->ssid) - 1);
+                        (*pp_node)->last_network_update = (uint32_t)time(NULL);
+                        ESP_LOGI(TAG, "Node %d network: IP=%s, RSSI=%d dBm, SSID=%s", node_id, ip, rssi, ssid);
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "Node %d network info format error: %s", node_id, alert_msg);
+                    }
+                }
+                else if (alert_code == 102)
+                {
+                    // Wake event: "WAKE:door EXPECTED_UP:30s PREV_SLEEP:120s PREV_UP:15s"
+                    char wake_source[32] = {0};
+                    int expected_up = 0, prev_sleep = 0, prev_up = 0;
+
+                    int matched = sscanf(alert_msg, "WAKE:%31s EXPECTED_UP:%ds PREV_SLEEP:%ds PREV_UP:%ds",
+                                         wake_source, &expected_up, &prev_sleep, &prev_up);
+                    if (matched == 4)
+                    {
+                        strncpy((*pp_node)->last_wake_source, wake_source, sizeof((*pp_node)->last_wake_source) - 1);
+                        (*pp_node)->expected_uptime_sec = expected_up;
+                        (*pp_node)->prev_sleep_sec = prev_sleep;
+                        (*pp_node)->prev_uptime_sec = prev_up;
+                        (*pp_node)->last_wake_timestamp = time(NULL);
+
+                        ESP_LOGI(TAG, "Node %d wake: source=%s expected_up=%ds prev_sleep=%ds prev_up=%ds",
+                                 node_id, wake_source, expected_up, prev_sleep, prev_up);
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "Node %d wake event format error: %s", node_id, alert_msg);
+                    }
+                }
+                else if (alert_code == 104)
+                {
+                    // Anomaly: "ANOMALY:extended_active UP:65s EXPECTED:30s REASON:door_event REFRESHES:47"
+                    int actual_up = 0, expected = 0, refreshes = 0;
+                    char reason[32] = {0};
+
+                    int matched = sscanf(alert_msg, "ANOMALY:extended_active UP:%ds EXPECTED:%ds REASON:%31s REFRESHES:%d",
+                                         &actual_up, &expected, reason, &refreshes);
+                    if (matched == 4)
+                    {
+                        (*pp_node)->last_anomaly_uptime = actual_up;
+
+                        // Free previous reason string if exists
+                        if ((*pp_node)->last_anomaly_reason)
+                        {
+                            free((*pp_node)->last_anomaly_reason);
+                        }
+                        (*pp_node)->last_anomaly_reason = strdup(reason);
+
+                        (*pp_node)->last_anomaly_refreshes = refreshes;
+                        (*pp_node)->last_anomaly_timestamp = time(NULL);
+                        (*pp_node)->anomaly_count++;
+
+                        ESP_LOGW(TAG, "Node %d ANOMALY: active=%ds expected=%ds reason=%s refreshes=%d (total anomalies: %d)",
+                                 node_id, actual_up, expected, reason, refreshes, (*pp_node)->anomaly_count);
+
+                        // High refresh count indicates serious hardware issue
+                        if (refreshes > 20)
+                        {
+                            ESP_LOGE(TAG, "Node %d CRITICAL: High refresh count %d suggests hardware issue (%s)",
+                                     node_id, refreshes, reason);
+                        }
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "Node %d anomaly format error: %s", node_id, alert_msg);
+                    }
+                }
+                else if (alert_code >= 100 && alert_code < 200)
+                {
+                    // Other system alerts (reserved for future use)
+                    ESP_LOGI(TAG, "Node %d system alert [%d]: %s", node_id, alert_code, alert_msg);
+                }
+                else if (alert_code >= 300)
+                {
+                    // User-defined application alerts
+                    ESP_LOGI(TAG, "Node %d alert [%d]: %s", node_id, alert_code, alert_msg);
+                }
+            }
+        }
+    }
+
+    // Handle MSG_LOG_RESPONSE
+    if (msg_type == MSG_LOG_RESPONSE)
+    {
+        if (NULL == *pp_session || NULL == *pp_node)
+        {
+            nodeio_handle_error(client_fd, "Session or Node context non existent");
+            cJSON_Delete(root);
+            return;
+        }
+        if ((*pp_session)->client_fd == client_fd && (*pp_node)->current_state == NODEIO_STATE_CONNECTED)
+        {
+            ESP_LOGI(TAG, "Received log response from node %d", node_id);
+
+            // Extract payload
+            cJSON *payload = cJSON_GetObjectItem(root, "payload");
+            if (!payload || !cJSON_IsObject(payload))
+            {
+                ESP_LOGW(TAG, "Log response missing or invalid payload");
+                cJSON_Delete(root);
+                return;
+            }
+
+            cJSON *total_lines_item = cJSON_GetObjectItem(payload, "total_lines");
+            cJSON *logs_array = cJSON_GetObjectItem(payload, "logs");
+
+            if (!total_lines_item || !cJSON_IsNumber(total_lines_item) ||
+                !logs_array || !cJSON_IsArray(logs_array))
+            {
+                ESP_LOGW(TAG, "Log response payload missing total_lines or logs array");
+                cJSON_Delete(root);
+                return;
+            }
+
+            int total_lines = total_lines_item->valueint;
+            int logs_count = cJSON_GetArraySize(logs_array);
+
+            ESP_LOGI(TAG, "Node %d log response: total_lines=%d, received=%d lines",
+                     node_id, total_lines, logs_count);
+
+            // Free any existing stored logs
+            if ((*pp_node)->log_lines)
+            {
+                for (int i = 0; i < (*pp_node)->log_count; i++)
+                {
+                    free((*pp_node)->log_lines[i]);
+                }
+                free((*pp_node)->log_lines);
+                (*pp_node)->log_lines = NULL;
+            }
+
+            // Store logs for frontend retrieval
+            if (logs_count > 0)
+            {
+                (*pp_node)->log_lines = (char **)malloc(logs_count * sizeof(char *));
+                if ((*pp_node)->log_lines)
+                {
+                    (*pp_node)->log_count = 0;
+                    for (int i = 0; i < logs_count; i++)
+                    {
+                        cJSON *log_item = cJSON_GetArrayItem(logs_array, i);
+                        if (log_item && cJSON_IsObject(log_item))
+                        {
+                            cJSON *line_item = cJSON_GetObjectItem(log_item, "line");
+                            if (line_item && cJSON_IsString(line_item))
+                            {
+                                (*pp_node)->log_lines[(*pp_node)->log_count] = strdup(line_item->valuestring);
+                                if ((*pp_node)->log_lines[(*pp_node)->log_count])
+                                {
+                                    (*pp_node)->log_count++;
+                                }
+                            }
+                        }
+                    }
+                    (*pp_node)->log_timestamp = time(NULL);
+                    (*pp_node)->logs_available = true;
+                    ESP_LOGI(TAG, "Stored %d log lines for node %d", (*pp_node)->log_count, node_id);
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "Failed to allocate memory for log storage");
+                }
+            }
+
+            // Log preview (first 3 lines)
+            int preview_count = ((*pp_node)->log_count < 3) ? (*pp_node)->log_count : 3;
+            for (int i = 0; i < preview_count; i++)
+            {
+                ESP_LOGI(TAG, "  [%d]: %s", i, (*pp_node)->log_lines[i]);
+            }
+            if ((*pp_node)->log_count > preview_count)
+            {
+                ESP_LOGI(TAG, "  ... and %d more lines", (*pp_node)->log_count - preview_count);
+            }
         }
     }
 
@@ -1197,6 +1424,24 @@ static void nodeio_handle_disconnect(int client_fd, uint8_t node_id)
     node_params_t *p_node = node_contexts[node_id].p_node;
     if (p_node)
     {
+        // Free stored logs if any
+        if (p_node->log_lines)
+        {
+            for (int i = 0; i < p_node->log_count; i++)
+            {
+                free(p_node->log_lines[i]);
+            }
+            free(p_node->log_lines);
+            p_node->log_lines = NULL;
+        }
+
+        // Free anomaly reason string if allocated
+        if (p_node->last_anomaly_reason)
+        {
+            free(p_node->last_anomaly_reason);
+            p_node->last_anomaly_reason = NULL;
+        }
+
         free(p_node);
         node_contexts[node_id].p_node = NULL;
     }
@@ -1546,6 +1791,33 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
                                 (unsigned)ctx->subscription.subscribe_mask,
                                 (unsigned)ctx->subscription.interval_ms) < 0)
                     break;
+
+                // Add lifecycle tracking info if available
+                if (ctx->p_node->last_wake_source[0] != '\0')
+                {
+                    if (json_append(json, json_size, &offset, "\"last_wake_source\":\"%s\",\"expected_uptime\":%d,\"prev_sleep\":%d,\"prev_uptime\":%d,",
+                                    ctx->p_node->last_wake_source,
+                                    ctx->p_node->expected_uptime_sec,
+                                    ctx->p_node->prev_sleep_sec,
+                                    ctx->p_node->prev_uptime_sec) < 0)
+                        break;
+                }
+
+                // Add anomaly info if present
+                if (ctx->p_node->anomaly_count > 0)
+                {
+                    if (json_append(json, json_size, &offset, "\"anomaly_count\":%u,",
+                                    (unsigned)ctx->p_node->anomaly_count) < 0)
+                        break;
+
+                    if (ctx->p_node->last_anomaly_reason)
+                    {
+                        if (json_append(json, json_size, &offset, "\"last_anomaly_reason\":\"%s\",\"last_anomaly_refreshes\":%d,",
+                                        ctx->p_node->last_anomaly_reason,
+                                        ctx->p_node->last_anomaly_refreshes) < 0)
+                            break;
+                    }
+                }
             }
 
             // Sensors: output all available from sensors LUT
@@ -1816,4 +2088,86 @@ int nodeio_get_connected_node_count(void)
         }
     }
     return node_count;
+}
+
+node_params_t *nodeio_get_node_params(uint8_t node_id)
+{
+    if (node_id >= MAX_NODES)
+    {
+        return NULL;
+    }
+    return node_contexts[node_id].p_node;
+}
+
+esp_err_t nodeio_request_logs(uint8_t node_id, uint16_t max_lines)
+{
+    ESP_LOGI(TAG, "Requesting logs from node %d (max_lines: %d)", node_id, max_lines);
+
+    // Validate node_id
+    if (node_id >= MAX_NODES)
+    {
+        ESP_LOGE(TAG, "Invalid node_id %d (max: %d)", node_id, MAX_NODES - 1);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    node_context_t *ctx = &node_contexts[node_id];
+
+    // Validate node is connected and supports remote logging
+    if (!ctx->p_node || !ctx->p_session || !ctx->p_session->connected)
+    {
+        ESP_LOGW(TAG, "Node %d not connected", node_id);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!(ctx->p_node->capability_mask & CAP_REMOTE_LOGGING))
+    {
+        ESP_LOGW(TAG, "Node %d does not support remote logging", node_id);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    // Build JSON message
+    cJSON *root = cJSON_CreateObject();
+    if (!root)
+    {
+        ESP_LOGE(TAG, "Failed to create JSON object");
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON_AddNumberToObject(root, "magic", PROTOCOL_MAGIC);
+    cJSON_AddStringToObject(root, "type", MSG_TYP_LOG_REQUEST);
+    cJSON_AddNumberToObject(root, "node_id", node_id);
+    cJSON_AddNumberToObject(root, "seq_num", node_local_seq[node_id]++);
+    cJSON_AddNumberToObject(root, "timestamp", time(NULL));
+
+    cJSON *payload = cJSON_CreateObject();
+    if (!payload)
+    {
+        ESP_LOGE(TAG, "Failed to create payload object");
+        cJSON_Delete(root);
+        return ESP_ERR_NO_MEM;
+    }
+    cJSON_AddNumberToObject(payload, "max_lines", max_lines);
+    cJSON_AddItemToObject(root, "payload", payload);
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!json_str)
+    {
+        ESP_LOGE(TAG, "Failed to serialize JSON");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Send via WebSocket
+    esp_err_t err = websockserver_send(ctx->p_session->client_fd, json_str, strlen(json_str)) ? ESP_OK : ESP_FAIL;
+    free(json_str);
+
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to send log request to node %d: %s", node_id, esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Log request sent to node %d", node_id);
+    return ESP_OK;
 }

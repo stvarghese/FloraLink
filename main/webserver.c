@@ -338,14 +338,37 @@ static esp_err_t request_logs_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    uint8_t node_id = (uint8_t)atoi(node_id_str);
+    // Bounds check on node_id (CRITICAL FIX #3)
+    int node_id_int = atoi(node_id_str);
+    if (node_id_int < 0 || node_id_int >= MAX_SESSIONS)
+    {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        char err_buf[128];
+        snprintf(err_buf, sizeof(err_buf),
+                 "{\"ok\":false,\"error\":\"Invalid node_id %d (valid range: 0-%d)\"}\n",
+                 node_id_int, MAX_SESSIONS - 1);
+        httpd_resp_sendstr(req, err_buf);
+        ESP_LOGW("WebServer", "Invalid node_id in POST request: %d", node_id_int);
+        return ESP_OK;
+    }
+
+    uint8_t node_id = (uint8_t)node_id_int;
 
     // Optional: parse max_lines from query or POST body (default 300)
     uint16_t max_lines = 300;
     char max_lines_str[8];
     if (httpd_query_key_value(query, "max_lines", max_lines_str, sizeof(max_lines_str)) == ESP_OK)
     {
-        max_lines = (uint16_t)atoi(max_lines_str);
+        int max_lines_int = atoi(max_lines_str);
+        if (max_lines_int > 0 && max_lines_int <= 10000) // Cap at 10K lines
+        {
+            max_lines = (uint16_t)max_lines_int;
+        }
+        else
+        {
+            ESP_LOGW("WebServer", "Invalid max_lines value: %d", max_lines_int);
+        }
     }
 
     // Send log request to node
@@ -390,7 +413,22 @@ static esp_err_t get_node_logs_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    uint8_t node_id = (uint8_t)atoi(node_id_str);
+    // Bounds check on node_id (CRITICAL FIX #3)
+    int node_id_int = atoi(node_id_str);
+    if (node_id_int < 0 || node_id_int >= MAX_SESSIONS)
+    {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        char err_buf[128];
+        snprintf(err_buf, sizeof(err_buf),
+                 "{\"status\":\"error\",\"message\":\"Invalid node_id %d (valid range: 0-%d)\"}\n",
+                 node_id_int, MAX_SESSIONS - 1);
+        httpd_resp_sendstr(req, err_buf);
+        ESP_LOGW("WebServer", "Invalid node_id in GET request: %d", node_id_int);
+        return ESP_OK;
+    }
+
+    uint8_t node_id = (uint8_t)node_id_int;
 
     // Get node params
     node_params_t *p_node = nodeio_get_node_params(node_id);
@@ -401,9 +439,13 @@ static esp_err_t get_node_logs_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    // Acquire lock to safely read logs (CRITICAL FIX #2)
+    nodeio_lock_logs();
+
     // Check if logs are available
     if (!p_node->logs_available || !p_node->log_lines || p_node->log_count == 0)
     {
+        nodeio_unlock_logs();
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"status\":\"pending\",\"message\":\"No logs available yet\"}\n");
         return ESP_OK;
@@ -413,20 +455,26 @@ static esp_err_t get_node_logs_handler(httpd_req_t *req)
     time_t now = time(NULL);
     if ((now - p_node->log_timestamp) > 60)
     {
-        // Clear expired logs
+        // Clear expired logs (thread-safe, but we already have lock)
         for (int i = 0; i < p_node->log_count; i++)
         {
-            free(p_node->log_lines[i]);
+            if (p_node->log_lines[i])
+                free(p_node->log_lines[i]);
         }
         free(p_node->log_lines);
         p_node->log_lines = NULL;
         p_node->log_count = 0;
         p_node->logs_available = false;
 
+        nodeio_unlock_logs();
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"status\":\"expired\",\"message\":\"Logs have expired\"}\n");
         return ESP_OK;
     }
+
+// Limit response size and use efficient batching (MEDIUM FIX #6, #7)
+#define MAX_LOG_RESPONSE_SIZE (64 * 1024) // 64KB max JSON response
+#define BATCH_SIZE 2048
 
     // Build JSON response with logs
     httpd_resp_set_type(req, "application/json");
@@ -437,43 +485,99 @@ static esp_err_t get_node_logs_handler(httpd_req_t *req)
     httpd_resp_sendstr(req, num_buf);
     httpd_resp_sendstr(req, ",\"logs\":[");
 
+    // Use batching to reduce overhead
+    char *batch_buf = malloc(BATCH_SIZE);
+    if (!batch_buf)
+    {
+        nodeio_unlock_logs();
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    int batch_offset = 0;
+    size_t total_response_size = 0;
+
     for (int i = 0; i < p_node->log_count; i++)
     {
         if (i > 0)
-            httpd_resp_sendstr(req, ",");
-
-        httpd_resp_sendstr(req, "{\"line\":\"");
-
-        // Escape quotes and backslashes in log line
-        const char *line = p_node->log_lines[i];
-        for (const char *p = line; *p; p++)
         {
-            if (*p == '"' || *p == '\\')
+            int written = snprintf(batch_buf + batch_offset, BATCH_SIZE - batch_offset, ",");
+            if (written < 0 || batch_offset + written >= BATCH_SIZE - 100)
             {
-                char esc[3] = {'\\', *p, '\0'};
-                httpd_resp_sendstr(req, esc);
-            }
-            else if (*p == '\n')
-            {
-                httpd_resp_sendstr(req, "\\n");
-            }
-            else if (*p == '\r')
-            {
-                httpd_resp_sendstr(req, "\\r");
-            }
-            else if (*p == '\t')
-            {
-                httpd_resp_sendstr(req, "\\t");
+                httpd_resp_sendstr(req, batch_buf);
+                batch_offset = 0;
+                total_response_size += strlen(batch_buf);
+                if (total_response_size > MAX_LOG_RESPONSE_SIZE)
+                {
+                    ESP_LOGW("WebServer", "Log response exceeds max size, truncating");
+                    break;
+                }
             }
             else
             {
-                char ch[2] = {*p, '\0'};
-                httpd_resp_sendstr(req, ch);
+                batch_offset += written;
             }
         }
 
-        httpd_resp_sendstr(req, "\"}");
+        batch_offset += snprintf(batch_buf + batch_offset, BATCH_SIZE - batch_offset, "{\"line\":\"");
+
+        // Escape and add log line
+        const char *line = p_node->log_lines[i];
+        if (line)
+        {
+            for (const char *p = line; *p && batch_offset < BATCH_SIZE - 10; p++)
+            {
+                if (*p == '"' || *p == '\\')
+                {
+                    batch_offset += snprintf(batch_buf + batch_offset, BATCH_SIZE - batch_offset, "\\%c", *p);
+                }
+                else if (*p == '\n')
+                {
+                    batch_offset += snprintf(batch_buf + batch_offset, BATCH_SIZE - batch_offset, "\\n");
+                }
+                else if (*p == '\r')
+                {
+                    batch_offset += snprintf(batch_buf + batch_offset, BATCH_SIZE - batch_offset, "\\r");
+                }
+                else if (*p == '\t')
+                {
+                    batch_offset += snprintf(batch_buf + batch_offset, BATCH_SIZE - batch_offset, "\\t");
+                }
+                else if (*p < 32 || *p > 126) // Control chars - skip
+                {
+                    // Skip non-printable characters
+                }
+                else
+                {
+                    batch_buf[batch_offset++] = *p;
+                }
+            }
+        }
+
+        batch_offset += snprintf(batch_buf + batch_offset, BATCH_SIZE - batch_offset, "\"}");
+
+        // Flush batch if getting full
+        if (batch_offset > BATCH_SIZE - 200)
+        {
+            httpd_resp_sendstr(req, batch_buf);
+            batch_offset = 0;
+            total_response_size += strlen(batch_buf);
+            if (total_response_size > MAX_LOG_RESPONSE_SIZE)
+            {
+                ESP_LOGW("WebServer", "Log response size limit reached");
+                break;
+            }
+        }
     }
+
+    // Send remaining batch
+    if (batch_offset > 0)
+    {
+        httpd_resp_sendstr(req, batch_buf);
+    }
+
+    free(batch_buf);
+    nodeio_unlock_logs();
 
     httpd_resp_sendstr(req, "]}\n");
     return ESP_OK;

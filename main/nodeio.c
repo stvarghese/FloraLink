@@ -10,6 +10,8 @@
 #include <time.h>
 #include <stddef.h>
 #include <stdarg.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 // Safe JSON append helper: appends formatted text into json buffer at offset with size json_size.
 // Returns number of bytes appended on success, or -1 on truncation/error.
@@ -40,6 +42,9 @@ static int json_append(char *json, size_t json_size, int *offset, const char *fm
 #define MAX_NODES MAX_SESSIONS
 
 static const char *TAG = "nodeio";
+
+// Mutex protecting log access (MSG_LOG_RESPONSE handler and GET handler)
+static SemaphoreHandle_t g_logs_mutex = NULL;
 
 typedef struct
 {
@@ -1034,6 +1039,9 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
             ESP_LOGI(TAG, "Node %d log response: total_lines=%d, received=%d lines",
                      node_id, total_lines, logs_count);
 
+            // Acquire lock before modifying logs
+            nodeio_lock_logs();
+
             // Free any existing stored logs
             if ((*pp_node)->log_lines)
             {
@@ -1060,10 +1068,24 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
                             cJSON *line_item = cJSON_GetObjectItem(log_item, "line");
                             if (line_item && cJSON_IsString(line_item))
                             {
-                                (*pp_node)->log_lines[(*pp_node)->log_count] = strdup(line_item->valuestring);
+                                // Validate and truncate log line to max length
+                                const char *src = line_item->valuestring;
+                                size_t src_len = strlen(src);
+                                if (src_len > 1024) // Max 1KB per line
+                                {
+                                    ESP_LOGW(TAG, "Log line too long (%zu bytes), truncating", src_len);
+                                    src_len = 1024;
+                                }
+                                (*pp_node)->log_lines[(*pp_node)->log_count] = malloc(src_len + 1);
                                 if ((*pp_node)->log_lines[(*pp_node)->log_count])
                                 {
+                                    strncpy((*pp_node)->log_lines[(*pp_node)->log_count], src, src_len);
+                                    (*pp_node)->log_lines[(*pp_node)->log_count][src_len] = '\0';
                                     (*pp_node)->log_count++;
+                                }
+                                else
+                                {
+                                    ESP_LOGW(TAG, "Failed to allocate memory for log line %d", i);
                                 }
                             }
                         }
@@ -1077,6 +1099,9 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
                     ESP_LOGE(TAG, "Failed to allocate memory for log storage");
                 }
             }
+
+            // Release lock
+            nodeio_unlock_logs();
 
             // Log preview (first 3 lines)
             int preview_count = ((*pp_node)->log_count < 3) ? (*pp_node)->log_count : 3;
@@ -1457,6 +1482,9 @@ static void nodeio_handle_disconnect(int client_fd, uint8_t node_id)
         free(p_evt);
         node_contexts[node_id].p_msg_event = NULL;
     }
+
+    // Clear any stored logs for this node
+    nodeio_clear_node_logs(node_id);
 
     // unsubscribe if subscribed
     nodeio_unsubscribe_from_node(client_fd);
@@ -2053,9 +2081,64 @@ size_t nodeio_publish_nodeslist(char *json, size_t json_size)
     return offset;
 }
 
-// Initialize nodeio(websocket) and wait for incoming connection requests
+/**
+ * @brief Clear stored logs for a node (thread-safe)
+ * Called on disconnect, reconnect, or timeout
+ */
+void nodeio_clear_node_logs(uint8_t node_id)
+{
+    if (node_id >= MAX_NODES)
+        return;
+
+    nodeio_lock_logs();
+
+    node_params_t *p_node = node_contexts[node_id].p_node;
+    if (p_node && p_node->log_lines)
+    {
+        for (int i = 0; i < p_node->log_count; i++)
+        {
+            if (p_node->log_lines[i])
+                free(p_node->log_lines[i]);
+        }
+        free(p_node->log_lines);
+        p_node->log_lines = NULL;
+        p_node->log_count = 0;
+        p_node->logs_available = false;
+        p_node->log_timestamp = 0;
+        ESP_LOGD(TAG, "Cleared logs for node %d", node_id);
+    }
+
+    nodeio_unlock_logs();
+}
+
+/**
+ * @brief Lock logs mutex for thread-safe access
+ */
+void nodeio_lock_logs(void)
+{
+    if (g_logs_mutex)
+        xSemaphoreTake(g_logs_mutex, portMAX_DELAY);
+}
+
+/**
+ * @brief Unlock logs mutex
+ */
+void nodeio_unlock_logs(void)
+{
+    if (g_logs_mutex)
+        xSemaphoreGive(g_logs_mutex);
+}
+
 esp_err_t nodeio_init(void)
 {
+    // Create mutex for log access protection
+    g_logs_mutex = xSemaphoreCreateMutex();
+    if (!g_logs_mutex)
+    {
+        ESP_LOGE(TAG, "Failed to create logs mutex");
+        return ESP_ERR_NO_MEM;
+    }
+
     // Set a less-verbose default log level to avoid noisy debug output in normal operation
     esp_log_level_set(TAG, ESP_LOG_INFO);
 

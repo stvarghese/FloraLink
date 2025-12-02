@@ -18,3 +18,10 @@ node_params_t *nodeio_get_node_params(uint8_t node_id);
 
 // Request logs from a node (sends MSG_LOG_REQUEST)
 esp_err_t nodeio_request_logs(uint8_t node_id, uint16_t max_lines);
+
+// Clear logs for a specific node (thread-safe, call on disconnect/error)
+void nodeio_clear_node_logs(uint8_t node_id);
+
+// Lock/unlock log access for thread-safe reads (used by webserver)
+void nodeio_lock_logs(void);
+void nodeio_unlock_logs(void);

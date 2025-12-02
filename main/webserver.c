@@ -5,6 +5,7 @@
 #include "websockserver.h"
 #include "wifi_setup.h"
 #include "commonutils.h"
+#include "secure_boot_config.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -125,13 +126,19 @@ static esp_err_t stats_get_handler(httpd_req_t *req)
     // Otherwise, serve JSON
     device_stats_t stats;
     monitor_get_device_stats(&stats);
-    char resp[192];
+    
+    // Get boot status history
+    char boot_history[256] = "UNKNOWN";
+    secboot_status_get_history_string(boot_history, sizeof(boot_history));
+    
+    char resp[384];
     snprintf(resp, sizeof(resp),
-             "{\"free_heap\":%u,\"min_free_heap\":%u,\"uptime_ms\":%llu,\"cpu_load\":%.2f}\n",
+             "{\"free_heap\":%u,\"min_free_heap\":%u,\"uptime_ms\":%llu,\"cpu_load\":%.2f,\"boot_history\":\"%s\"}\n",
              (unsigned int)stats.free_heap,
              (unsigned int)stats.min_free_heap,
              (unsigned long long)stats.uptime_ms,
-             stats.cpu_load);
+             stats.cpu_load,
+             boot_history);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;

@@ -13,6 +13,48 @@ menu "WiFi Configuration"
             Enter the password for the WiFi network.
 endmenu
 
+menu "Secure Boot Configuration"
+    config SECURE_BOOT_SANCTION_ENABLED
+        bool "Enable Secure Boot Sanctions (status tracking)"
+        default y
+        help
+            Enable boot status tracking and sanction policies.
+            Records boot success/failure history to secboot_status partition.
+
+    config SECURE_BOOT_WARN_ON_UNSIGNED
+        bool "Warn on unsigned firmware"
+        depends on SECURE_BOOT_SANCTION_ENABLED
+        default y
+        help
+            Log warning when unsigned firmware is detected but allow boot to continue.
+
+    config SECURE_BOOT_BLOCK_ON_UNSIGNED
+        bool "Block boot on unsigned firmware (enforce signed-only)"
+        depends on SECURE_BOOT_SANCTION_ENABLED
+        default n
+        help
+            Block (halt) boot if firmware is unsigned. Only signed images allowed.
+            Requires secure boot to be enabled and private key configured.
+
+    config SECURE_BOOT_RESET_ON_FAIL
+        bool "Reset on signature verification failure"
+        depends on SECURE_BOOT_SANCTION_ENABLED
+        default n
+        help
+            Automatically reset and retry boot if signature verification fails.
+            Otherwise, halt for manual intervention.
+
+    config SECURE_BOOT_FIFO_SIZE
+        int "Boot status history FIFO size"
+        depends on SECURE_BOOT_SANCTION_ENABLED
+        range 4 32
+        default 10
+        help
+            Number of boot status entries to keep in ring buffer.
+            Default 10 entries = 10 bytes of storage.
+
+endmenu
+
 menu "FloraLink Configuration"
 
     orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"

@@ -19,6 +19,7 @@ idf_component_register(
         "dns_server.c"
         "gpiobutton.c"
         "commonutils.c"
+        "secure_boot_status.c"
     #idf_component_register(SRCS "test_led_app.c" "onboardled.c" "freertos_hooks.c"
     INCLUDE_DIRS "."
     # REQUIRES: list each component on its own line so you can

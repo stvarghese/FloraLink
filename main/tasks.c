@@ -36,7 +36,7 @@
 #include "nvm.h"
 #include "dns_server.h"
 #include "modemanager.h"
-
+#include "secure_boot_config.h"
 #include "commonutils.h"
 
 #include "freertos/FreeRTOS.h"
@@ -336,6 +336,12 @@ static void init_task(void *pvParameters)
     {
         ESP_LOGE(TAG, "Failed to initialize NVM storage");
         vTaskDelete(NULL);
+    }
+
+    // Initialize secure boot status tracking
+    if (secboot_status_init() != 0)
+    {
+        ESP_LOGW(TAG, "Failed to initialize boot status - continuing anyway");
     }
 
     // Configure auto light sleep for power management

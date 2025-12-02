@@ -106,28 +106,32 @@ static esp_err_t stats_get_handler(httpd_req_t *req)
         SEND_HTML_CHUNK("<link rel='stylesheet' href='/main.css'>");
         SEND_HTML_CHUNK("<script src='/main.js'></script>");
         SEND_HTML_CHUNK("</head><body><div class='container'>");
-        
+
         // Boot status warning banner
         secboot_status_t boot_status;
         char boot_history[256] = "";
         int has_failures = 0;
-        if (secboot_status_get(&boot_status) == 0 && boot_status.fifo_size > 0) {
+        if (secboot_status_get(&boot_status) == 0 && boot_status.fifo_size > 0)
+        {
             secboot_status_get_history_string(boot_history, sizeof(boot_history));
             // Check for failures in history
-            for (int i = 0; i < boot_status.fifo_size; i++) {
-                if (boot_status.fifo[i] == SECBOOT_STATUS_FAIL) {
+            for (int i = 0; i < boot_status.fifo_size; i++)
+            {
+                if (boot_status.fifo[i] == SECBOOT_STATUS_FAIL)
+                {
                     has_failures = 1;
                     break;
                 }
             }
         }
-        
-        if (has_failures) {
+
+        if (has_failures)
+        {
             SEND_HTML_CHUNK("<div style='background-color:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:12px;margin:10px 0;color:#856404;'>");
             SEND_HTML_CHUNK("<strong>⚠️ Boot Status Warning:</strong> Recent boot failures detected.<br>");
             SEND_HTML_CHUNK("History: <code id='bootHistoryBanner'>-</code></div>");
         }
-        
+
         SEND_HTML_CHUNK("    <nav class='nav'>\n"
                         "        <a href='/'>Home</a>\n"
                         "        <a href='/configure'>Configure</a>\n"
@@ -149,11 +153,11 @@ static esp_err_t stats_get_handler(httpd_req_t *req)
     // Otherwise, serve JSON
     device_stats_t stats;
     monitor_get_device_stats(&stats);
-    
+
     // Get boot status history
     char boot_history[256] = "UNKNOWN";
     secboot_status_get_history_string(boot_history, sizeof(boot_history));
-    
+
     char resp[384];
     snprintf(resp, sizeof(resp),
              "{\"free_heap\":%u,\"min_free_heap\":%u,\"uptime_ms\":%llu,\"cpu_load\":%.2f,\"boot_history\":\"%s\"}\n",

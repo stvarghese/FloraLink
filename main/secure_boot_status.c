@@ -1,7 +1,7 @@
 /**
  * @file secure_boot_status.c
  * @brief Secure Boot Status Tracking Implementation
- * 
+ *
  * Manages boot status FIFO stored in secboot_status partition.
  * App reads, clears, and maintains history after each boot.
  */
@@ -30,9 +30,8 @@ static const esp_partition_t *secboot_get_partition(void)
 {
     return esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA,
-        ESP_PARTITION_SUBTYPE_DATA_NVS,  // Using NVS subtype for data
-        "secboot_status"
-    );
+        ESP_PARTITION_SUBTYPE_DATA_NVS, // Using NVS subtype for data
+        "secboot_status");
 }
 
 /**
@@ -41,13 +40,15 @@ static const esp_partition_t *secboot_get_partition(void)
 static int secboot_partition_read(secboot_status_t *status)
 {
     const esp_partition_t *part = secboot_get_partition();
-    if (!part) {
+    if (!part)
+    {
         ESP_LOGE(TAG, "secboot_status partition not found");
         return -1;
     }
 
     esp_err_t ret = esp_partition_read(part, 0, (uint8_t *)status, sizeof(secboot_status_t));
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "Failed to read secboot_status partition: %s", esp_err_to_name(ret));
         return -1;
     }
@@ -61,21 +62,24 @@ static int secboot_partition_read(secboot_status_t *status)
 static int secboot_partition_write(const secboot_status_t *status)
 {
     const esp_partition_t *part = secboot_get_partition();
-    if (!part) {
+    if (!part)
+    {
         ESP_LOGE(TAG, "secboot_status partition not found");
         return -1;
     }
 
     // Erase sector before writing (4KB minimum)
     esp_err_t ret = esp_partition_erase_range(part, 0, 4096);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "Failed to erase secboot_status partition: %s", esp_err_to_name(ret));
         return -1;
     }
 
     // Write status structure
     ret = esp_partition_write(part, 0, (const uint8_t *)status, sizeof(secboot_status_t));
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "Failed to write secboot_status partition: %s", esp_err_to_name(ret));
         return -1;
     }
@@ -93,34 +97,41 @@ static int secboot_partition_write(const secboot_status_t *status)
  */
 int secboot_status_init(void)
 {
-    if (!CONFIG_SECURE_BOOT_SANCTION_ENABLED) {
+    if (!CONFIG_SECURE_BOOT_SANCTION_ENABLED)
+    {
         ESP_LOGI(TAG, "Boot status tracking disabled");
         return 0;
     }
 
     secboot_status_t status;
-    if (secboot_partition_read(&status) != 0) {
+    if (secboot_partition_read(&status) != 0)
+    {
         ESP_LOGE(TAG, "Failed to read boot status on init");
         return -1;
     }
 
     // Validate magic
-    if (status.magic != SECBOOT_MAGIC) {
+    if (status.magic != SECBOOT_MAGIC)
+    {
         ESP_LOGW(TAG, "Invalid boot status magic, initializing...");
         memset(&status, 0, sizeof(status));
         status.magic = SECBOOT_MAGIC;
         status.boot_count = 1;
         status.fifo_size = 0;
         status.fifo_head = 0;
-        
-        if (secboot_partition_write(&status) != 0) {
+
+        if (secboot_partition_write(&status) != 0)
+        {
             ESP_LOGE(TAG, "Failed to initialize boot status");
             return -1;
         }
-    } else {
+    }
+    else
+    {
         // Increment boot count
         status.boot_count++;
-        if (secboot_partition_write(&status) != 0) {
+        if (secboot_partition_write(&status) != 0)
+        {
             ESP_LOGE(TAG, "Failed to update boot count");
             return -1;
         }
@@ -128,7 +139,7 @@ int secboot_status_init(void)
 
     ESP_LOGI(TAG, "Boot status init: count=%u, history_len=%u",
              status.boot_count, status.fifo_size);
-    
+
     return 0;
 }
 
@@ -137,7 +148,8 @@ int secboot_status_init(void)
  */
 int secboot_status_get(secboot_status_t *out_status)
 {
-    if (!out_status) {
+    if (!out_status)
+    {
         ESP_LOGE(TAG, "Invalid output buffer");
         return -1;
     }
@@ -151,40 +163,48 @@ int secboot_status_get(secboot_status_t *out_status)
  */
 int secboot_status_push(uint8_t status)
 {
-    if (!CONFIG_SECURE_BOOT_SANCTION_ENABLED) {
+    if (!CONFIG_SECURE_BOOT_SANCTION_ENABLED)
+    {
         return 0;
     }
 
-    if (status != SECBOOT_STATUS_OK && status != SECBOOT_STATUS_FAIL) {
+    if (status != SECBOOT_STATUS_OK && status != SECBOOT_STATUS_FAIL)
+    {
         ESP_LOGE(TAG, "Invalid boot status: %u", status);
         return -1;
     }
 
     secboot_status_t sb_status;
-    if (secboot_partition_read(&sb_status) != 0) {
+    if (secboot_partition_read(&sb_status) != 0)
+    {
         return -1;
     }
 
     // Validate magic
-    if (sb_status.magic != SECBOOT_MAGIC) {
+    if (sb_status.magic != SECBOOT_MAGIC)
+    {
         ESP_LOGE(TAG, "Boot status structure corrupted");
         return -1;
     }
 
     // Push to FIFO
-    if (sb_status.fifo_size < CONFIG_SECURE_BOOT_FIFO_SIZE) {
+    if (sb_status.fifo_size < CONFIG_SECURE_BOOT_FIFO_SIZE)
+    {
         // FIFO not full, just append
         sb_status.fifo[sb_status.fifo_head] = status;
         sb_status.fifo_head = (sb_status.fifo_head + 1) % CONFIG_SECURE_BOOT_FIFO_SIZE;
         sb_status.fifo_size++;
-    } else {
+    }
+    else
+    {
         // FIFO full, overwrite oldest (circular)
         sb_status.fifo[sb_status.fifo_head] = status;
         sb_status.fifo_head = (sb_status.fifo_head + 1) % CONFIG_SECURE_BOOT_FIFO_SIZE;
     }
 
     // Write back
-    if (secboot_partition_write(&sb_status) != 0) {
+    if (secboot_partition_write(&sb_status) != 0)
+    {
         ESP_LOGE(TAG, "Failed to push boot status");
         return -1;
     }
@@ -199,17 +219,20 @@ int secboot_status_push(uint8_t status)
  */
 int secboot_status_get_history_string(char *out_str, size_t max_len)
 {
-    if (!out_str || max_len < 3) {
+    if (!out_str || max_len < 3)
+    {
         return -1;
     }
 
     secboot_status_t sb_status;
-    if (secboot_partition_read(&sb_status) != 0) {
+    if (secboot_partition_read(&sb_status) != 0)
+    {
         snprintf(out_str, max_len, "ERROR");
         return -1;
     }
 
-    if (sb_status.fifo_size == 0) {
+    if (sb_status.fifo_size == 0)
+    {
         snprintf(out_str, max_len, "EMPTY");
         return 5;
     }
@@ -218,20 +241,22 @@ int secboot_status_get_history_string(char *out_str, size_t max_len)
     char *ptr = out_str;
     int remaining = max_len;
 
-    for (int i = 0; i < sb_status.fifo_size; i++) {
+    for (int i = 0; i < sb_status.fifo_size; i++)
+    {
         int idx = (sb_status.fifo_head - sb_status.fifo_size + i) % CONFIG_SECURE_BOOT_FIFO_SIZE;
         const char *status_str = sb_status.fifo[idx] == SECBOOT_STATUS_OK ? "OK" : "FAIL";
-        
+
         int written = snprintf(ptr, remaining, "%s%s",
-                              i > 0 ? ", " : "",
-                              status_str);
-        
-        if (written < 0 || written >= remaining) {
+                               i > 0 ? ", " : "",
+                               status_str);
+
+        if (written < 0 || written >= remaining)
+        {
             // Buffer overflow, truncate
             ptr[remaining - 1] = '\0';
             return -1;
         }
-        
+
         ptr += written;
         remaining -= written;
     }
@@ -244,7 +269,8 @@ int secboot_status_get_history_string(char *out_str, size_t max_len)
  */
 int secboot_status_clear(void)
 {
-    if (!CONFIG_SECURE_BOOT_SANCTION_ENABLED) {
+    if (!CONFIG_SECURE_BOOT_SANCTION_ENABLED)
+    {
         return 0;
     }
 
@@ -255,7 +281,8 @@ int secboot_status_clear(void)
     sb_status.fifo_size = 0;
     sb_status.fifo_head = 0;
 
-    if (secboot_partition_write(&sb_status) != 0) {
+    if (secboot_partition_write(&sb_status) != 0)
+    {
         ESP_LOGE(TAG, "Failed to clear boot status");
         return -1;
     }

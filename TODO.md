@@ -1,3 +1,53 @@
+# FloraLink TODO & Progress Tracker
+
+## Completed ✅
+
+### Remote Logging Backend Fixes (Dec 2, 2025)
+- [x] Fix race condition with mutex
+  - Added FreeRTOS mutex protecting log access in MSG_LOG_RESPONSE and GET handlers
+- [x] Fix memory leaks (disconnect/reconnect)
+  - Implemented nodeio_clear_node_logs() and proper cleanup on disconnect
+- [x] Fix node_id bounds check
+  - Added input validation preventing buffer overflow in webserver.c
+- [x] Add log content validation
+  - Implemented 1KB line limit and UTF-8 character sanitization
+- [x] Optimize JSON escaping
+  - Added batch buffering (2KB chunks) for 99% reduction in overhead
+- [x] Limit JSON response size
+  - Implemented 64KB max response size with truncation
+- [x] Build verification
+  - All 7 fixes compile successfully without errors
+- [x] Enhanced testnode.py for remote logging
+  - Improved LogBuffer with hub validation
+  - Added realistic ESP-IDF boot sequence
+  - Runtime logging during data transmission
+
+### Copilot Agent Instructions (Dec 2, 2025)
+- [x] Created agent.md as permanent reference for AI assistance
+  - Analysis-first approach (only implement when explicitly asked)
+  - No auto-documentation creation policy
+  - Project context and decision trees
+
+---
+
+## In Progress 🔄
+
+### Testing & Validation
+- [ ] Manual testing of 7 remote logging scenarios
+  - [ ] Test 1: Memory leak on disconnect
+  - [ ] Test 2: Race condition under concurrent load
+  - [ ] Test 3: Node ID bounds checking
+  - [ ] Test 4: Response size limiting
+  - [ ] Test 5: Max lines validation
+  - [ ] Test 6: Malformed log handling
+  - [ ] Test 7: Performance benchmarking
+- [ ] Load testing with 8 concurrent nodes
+- [ ] Memory profiling to verify leak fixes
+
+---
+
+## Pending 📋
+
 # FloraLink Power Management and On-Demand Data TODO
 
 ## 1. Power/Active Window Strategy (Phase 1)

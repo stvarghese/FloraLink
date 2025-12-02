@@ -41,18 +41,25 @@ class LogBuffer:
         self.size = size
         self.buffer = []
         self.write_index = 0
+        self.line_count = 0  # Total lines added (for debugging)
         
     def add(self, line):
-        """Add a log line to the buffer."""
-        line = str(line)[:LOG_ENTRY_LINE_LEN]  # Truncate to max length
+        """Add a log line to the buffer, truncating to 1KB per hub requirement."""
+        line = str(line)
+        # Hub enforces 1KB max line length as of recent fixes
+        if len(line) > 1024:
+            line = line[:1024]
+        
         if len(self.buffer) < self.size:
             self.buffer.append(line)
         else:
             self.buffer[self.write_index] = line
             self.write_index = (self.write_index + 1) % self.size
+        
+        self.line_count += 1
     
     def get_logs(self, max_lines=None):
-        """Get logs in chronological order (oldest first)."""
+        """Get logs in chronological order (oldest first), respecting hub's max_lines validation."""
         if not self.buffer:
             return []
         
@@ -63,11 +70,28 @@ class LogBuffer:
             # Buffer is full, need to reorder from write_index (oldest)
             logs = self.buffer[self.write_index:] + self.buffer[:self.write_index]
         
-        # Limit to max_lines if specified
-        if max_lines and max_lines < len(logs):
-            logs = logs[-max_lines:]  # Return most recent max_lines
+        # Hub validates max_lines: must be between 1 and 10000 (or use default)
+        if max_lines is None:
+            max_lines = len(logs)
+        elif max_lines < 1:
+            max_lines = 1
+        elif max_lines > 10000:
+            max_lines = 10000
+        
+        # Return most recent max_lines
+        if max_lines < len(logs):
+            logs = logs[-max_lines:]
         
         return logs
+    
+    def get_buffer_stats(self):
+        """Return buffer statistics for debugging."""
+        return {
+            "total_added": self.line_count,
+            "current_lines": len(self.buffer),
+            "capacity": self.size,
+            "is_full": len(self.buffer) >= self.size
+        }
 
 def build_base_message(msg_type, node_id, seq_num):
     # Ensure node_id is numeric for strict backend parsing
@@ -160,21 +184,61 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
     # Create log buffer for this node
     log_buffer = LogBuffer()
     
-    # Simulate some initial boot logs
-    log_buffer.add(f"I (0) boot: ESP-IDF v4.4.6 2nd stage bootloader")
-    log_buffer.add(f"I (0) boot: Compile time: Jan 15 2025 12:34:56")
-    log_buffer.add(f"I (12) boot: Enabling RNG early entropy source...")
-    log_buffer.add(f"I (17) boot: SPI Speed: 40MHz")
-    log_buffer.add(f"I (22) boot: SPI Mode: DIO")
-    log_buffer.add(f"I (26) boot: SPI Flash Size: 4MB")
-    log_buffer.add(f"I (31) boot: Partition Table:")
-    log_buffer.add(f"I (34) boot: End of partition table")
-    log_buffer.add(f"I (43) esp_image: segment 0: Verified")
-    log_buffer.add(f"I (156) cpu_start: Pro cpu up.")
-    log_buffer.add(f"I (167) cpu_start: Starting scheduler on PRO CPU.")
-    log_buffer.add(f"I (0) cpu_start: Starting scheduler on APP CPU.")
-    log_buffer.add(f"I (234) main: FloraNode starting (node_id={node_id})...")
-    log_buffer.add(f"I (256) WiFi: Connecting to AP...")
+    # Simulate realistic ESP-IDF boot sequence logs (matches actual ESP32-C3 output)
+    boot_logs = [
+        "ets Jun  8 2016 00:22:57 rst:0x1 (POWERON_RESET),boot mode:(0,0)",
+        "I (27) boot: ESP-IDF v5.5.0-dirty 2nd stage bootloader",
+        "I (27) boot: Compile time: Dec  2 2025 14:23:45",
+        "I (27) boot: Enabling RNG early entropy source...",
+        "I (35) boot: SPI Speed: 40MHz",
+        "I (39) boot: SPI Mode: DIO",
+        "I (43) boot: SPI Flash Size: 4MB",
+        "I (47) boot: Partition Table:",
+        "I (50) boot:  # Label            Usage          Type ST Offset   Length",
+        "I (58) boot:  0 nvs              NVRAM          data 01 00009000 00006000",
+        "I (65) boot:  1 otadata          OTA data       data 01 0000f000 00002000",
+        "I (73) boot:  2 ota_0            OTA app        app  00 00011000 001f4c00",
+        "I (80) boot:  3 ota_1            OTA app        app  00 00205c00 001f4c00",
+        "I (88) boot: End of partition table",
+        "I (92) boot: Verification took 2468 ms (successful)",
+        "I (93) esp_image: segment 0: paddr=00011020 vaddr=42000020 size=0c1fch ( 49660) map",
+        "I (109) esp_image: segment 1: paddr=0001d224 vaddr=3fc92c00 size=030c4h ( 12480) load",
+        "I (115) esp_image: segment 2: paddr=000202f0 vaddr=403bc000 size=00d4ch (  3404) load",
+        "I (120) esp_image: segment 3: paddr=0002101c vaddr=403bc000 size=00a28h (  2600) load",
+        "I (127) esp_image: segment 4: paddr=0002ba44 vaddr=50000000 size=00001h (     1) load",
+        "I (132) esp_image: Calculated digest: e7d4a5e8f0c2b1f6e3a9d4c2b1a9f8e7",
+        "I (138) esp_image: Segment 0 matched",
+        "I (142) boot: Loaded app from partition at offset 0x11000",
+        "I (148) boot: Disabling RNG early entropy source...",
+        "I (154) cpu_start: Unicore bootloader",
+        "I (158) cpu_start: Single core mode",
+        "I (162) cpu_start: Pro cpu start user code",
+        "I (162) cpu_start: cpu freq: 160 MHz",
+        "I (162) cpu_start: Application information:",
+        "I (165) cpu_start:   Project name:     FloraLink",
+        "I (171) cpu_start:   App version:      v2.0.0-rc1",
+        "I (176) cpu_start:   Compile time:     Dec  2 2025 14:23:45",
+        "I (182) cpu_start:   ELF file SHA256:  e7d4a5e8f0c2b1f6e3a9d4c2b1a9f8e7",
+        "I (188) cpu_start:   ESP-IDF version:  v5.5.0-dirty",
+        "I (194) heap_init: Initializing. RAM available for dynamic allocation:",
+        "I (200) heap_init: At 3FC94678, len 0004B988 (302 KiB): DRAM",
+        "I (207) heap_init: At 3FCE0000, len 00020000 (128 KiB): STACK/DRAM",
+        "I (213) heap_init: At 50000000, len 00000001 (0 KiB): RTCRAM",
+        "I (219) heap_init: Total dynamic heap size: 314 KiB",
+        "I (225) spi_flash: detected chip generic",
+        "I (229) spi_flash: flash io: drv=0x00 freq=40 mode=2",
+        "I (235) app_start: Starting scheduler on 0 CPU",
+        "I (240) main: Starting app_main()...",
+        f"I (245) nodeio: Initializing NodeIO subsystem (node_id={node_id})...",
+        "I (250) websock: WebSocket server listening on 0.0.0.0:80",
+        "I (256) wifi: WiFi connecting to network...",
+        "I (300) wifi: WiFi connected, IP: 192.168.1.100",
+        f"I (310) nodeio: NodeIO initialized successfully",
+        "I (315) main: Application started successfully",
+    ]
+    
+    for boot_log in boot_logs:
+        log_buffer.add(boot_log)
 
     try:
         # === Connect phase ===
@@ -279,17 +343,28 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                                     if log_enabled.is_set():
                                         print(f"[Node {node_id}] Unsubscribed by hub")
 
-                            # log_request: send log buffer contents
+                            # log_request: send log buffer contents (matches hub's MSG_LOG_REQUEST handling)
                             elif mtype == "log_request":
                                 payload = msg_obj.get("payload", {})
                                 max_lines = payload.get("max_lines", LOG_BUFFER_SIZE)
+                                
+                                # Validate max_lines like hub does (1-10000 range)
+                                if isinstance(max_lines, (int, float)):
+                                    max_lines = int(max_lines)
+                                    if max_lines < 1:
+                                        max_lines = 1
+                                    elif max_lines > 10000:
+                                        max_lines = 10000
+                                else:
+                                    max_lines = LOG_BUFFER_SIZE
+                                
                                 if log_enabled.is_set():
                                     print(f"[Node {node_id}] Log request received (max_lines: {max_lines})")
                                 
-                                # Get logs from buffer
+                                # Get logs from buffer (respects 1KB line limit from hub)
                                 logs = log_buffer.get_logs(max_lines)
                                 
-                                # Build response
+                                # Build response matching hub's expected format
                                 response = {
                                     "magic": PROTOCOL_MAGIC,
                                     "type": MSG_TYP_LOG_RESPONSE,
@@ -302,12 +377,15 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                                     }
                                 }
                                 
-                                # Send response
+                                # Send response (hub will handle mutex protection, size limits, escaping)
                                 try:
-                                    await websocket.send(json.dumps(response))
+                                    response_json = json.dumps(response)
+                                    await websocket.send(response_json)
                                     seq_num += 1
                                     if log_enabled.is_set():
-                                        print(f"[Node {node_id}] Sent {len(logs)} log lines to hub")
+                                        print(f"[Node {node_id}] Sent {len(logs)} log lines ({len(response_json)} bytes) to hub")
+                                except Exception as e:
+                                    log(f"[Node {node_id}] Failed to send log response: {repr(e)}")
                                 except Exception as e:
                                     if log_enabled.is_set():
                                         print(f"[Node {node_id}] Failed to send log response: {e}")
@@ -426,7 +504,11 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                         msg["payload"] = build_payloads(sensors)
 
                         await websocket.send(json.dumps(msg))
-                        log(f"[Node {node_id}] Sent live data")
+                        
+                        # Add runtime log entry
+                        runtime_log = f"D ({int(time.time() * 1000) % 100000}) nodeio: Sent node_data seq={seq_num} sensors={len(sensors)} services={len(services)}"
+                        log_buffer.add(runtime_log)
+                        log(f"[Node {node_id}] Sent live data (seq={seq_num})")
 
                         seq_num += 1
                     # else:

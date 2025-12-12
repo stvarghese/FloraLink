@@ -35,10 +35,9 @@ extern "C"
     {
         uint32_t magic;      // 0x5EC0B007 (validation magic)
         uint32_t boot_count; // Total boot attempts since creation
-        uint8_t fifo[10];    // Ring buffer: 0=OK, 1=FAIL (10 entries)
-        uint8_t fifo_head;   // Next write index (0-9)
+        uint8_t fifo[10];    // FIFO buffer: 0=OK, 1=FAIL (10 entries, oldest at [0], newest at [9])
         uint8_t fifo_size;   // Current FIFO occupancy (0-10)
-        uint8_t reserved[5]; // Padding to 32 bytes
+        uint8_t reserved[6]; // Padding to 32 bytes
     } __attribute__((packed)) secboot_status_t;
 
 #define SECBOOT_MAGIC 0x5EC0B007

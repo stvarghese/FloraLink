@@ -118,7 +118,6 @@ int secboot_status_init(void)
         status.magic = SECBOOT_MAGIC;
         status.boot_count = 1;
         status.fifo_size = 0;
-        status.fifo_head = 0;
 
         if (secboot_partition_write(&status) != 0)
         {
@@ -159,7 +158,8 @@ int secboot_status_get(secboot_status_t *out_status)
 
 /**
  * Push new boot status to FIFO (app-side logging)
- * Pops oldest if full, pushes new entry at head
+ * Newest element always at [9], oldest at [0]
+ * When full: shift all left (discard [0], move 1-9 to 0-8), add new at [9]
  */
 int secboot_status_push(uint8_t status)
 {
@@ -190,16 +190,18 @@ int secboot_status_push(uint8_t status)
     // Push to FIFO
     if (sb_status.fifo_size < CONFIG_SECURE_BOOT_FIFO_SIZE)
     {
-        // FIFO not full, just append
-        sb_status.fifo[sb_status.fifo_head] = status;
-        sb_status.fifo_head = (sb_status.fifo_head + 1) % CONFIG_SECURE_BOOT_FIFO_SIZE;
+        // FIFO not full, just append to next position
+        sb_status.fifo[sb_status.fifo_size] = status;
         sb_status.fifo_size++;
     }
     else
     {
-        // FIFO full, overwrite oldest (circular)
-        sb_status.fifo[sb_status.fifo_head] = status;
-        sb_status.fifo_head = (sb_status.fifo_head + 1) % CONFIG_SECURE_BOOT_FIFO_SIZE;
+        // FIFO full, shift left (discard oldest at [0]) and add new at [9]
+        for (int i = 0; i < CONFIG_SECURE_BOOT_FIFO_SIZE - 1; i++)
+        {
+            sb_status.fifo[i] = sb_status.fifo[i + 1];
+        }
+        sb_status.fifo[CONFIG_SECURE_BOOT_FIFO_SIZE - 1] = status;
     }
 
     // Write back
@@ -237,14 +239,13 @@ int secboot_status_get_history_string(char *out_str, size_t max_len)
         return 5;
     }
 
-    // Build history string from oldest to newest
+    // Build history string from oldest to newest (left to right: [0] to [fifo_size-1])
     char *ptr = out_str;
     int remaining = max_len;
 
     for (int i = 0; i < sb_status.fifo_size; i++)
     {
-        int idx = (sb_status.fifo_head - sb_status.fifo_size + i) % CONFIG_SECURE_BOOT_FIFO_SIZE;
-        const char *status_str = sb_status.fifo[idx] == SECBOOT_STATUS_OK ? "OK" : "FAIL";
+        const char *status_str = sb_status.fifo[i] == SECBOOT_STATUS_OK ? "OK" : "FAIL";
 
         int written = snprintf(ptr, remaining, "%s%s",
                                i > 0 ? ", " : "",
@@ -279,7 +280,6 @@ int secboot_status_clear(void)
     sb_status.magic = SECBOOT_MAGIC;
     sb_status.boot_count = 0;
     sb_status.fifo_size = 0;
-    sb_status.fifo_head = 0;
 
     if (secboot_partition_write(&sb_status) != 0)
     {

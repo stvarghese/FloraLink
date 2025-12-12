@@ -1,8 +1,8 @@
 menu "Bootloader config"
 
     config BOOTLOADER_PROJECT_VER
-        string "Bootloader project version"
-        default "1"
+        int "Bootloader project version"
+        default 1
         help
             Version number of the bootloader project.
             Used to track bootloader updates.

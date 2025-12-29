@@ -1,0 +1,2 @@
+rsource "main/Kconfig.projbuild"
+rsource "components/test_apps/Kconfig.projbuild"

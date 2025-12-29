@@ -1,0 +1,30 @@
+menu "Test Applications"
+
+    choice TEST_APP_MODE
+        prompt "Select Test Application Mode"
+        default TEST_APP_MODE_NONE
+        help
+            Select which test application to run. When a test app is selected,
+            it replaces the normal FloraLink application. The bootloader will
+            still perform signature verification before jumping to the test app.
+
+        config TEST_APP_MODE_NONE
+            bool "Normal FloraLink Application"
+            help
+                Run the normal FloraLink application (default mode).
+
+        config TEST_APP_MODE_SECBOOT
+            bool "Secure Boot Test Application"
+            help
+                Run comprehensive secure boot tests. Tests FIFO initialization,
+                persistence, push/pop operations, and overflow behavior.
+
+        config TEST_APP_MODE_LED
+            bool "LED Pattern Test Application"
+            help
+                Run LED pattern and button control test. Tests onboard LED
+                breathing, flashing, heartbeat patterns, and GPIO interrupts.
+
+    endchoice
+
+endmenu

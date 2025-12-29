@@ -50,8 +50,8 @@ static void demo_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(300));
         onboardled_failure(NULL);
 
-        ESP_LOGI(TAG, "Dance sequence (4 cycles)");
-        onboardled_dance(4, 150, 80);
+        ESP_LOGI(TAG, "Disco sequence (4 cycles)");
+        onboardled_disco(4, 150, 80);
     }
     else
     {
@@ -65,8 +65,6 @@ static void demo_task(void *arg)
 
 static void led_button_task(void *arg)
 {
-    bool breathing_on = false;
-
     ESP_LOGI(TAG, "LED breathing test task started, button on GPIO %d", TEST_BUTTON_GPIO);
 
     for (;;)
@@ -90,7 +88,6 @@ static void led_button_task(void *arg)
                      */
                     vTaskDelete(s_demo_task);
                     s_demo_task = NULL;
-                    breathing_on = false;
                 }
                 else
                 {

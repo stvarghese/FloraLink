@@ -30,7 +30,7 @@ MSG_TYP_LOG_REQUEST = "log_request"
 MSG_TYP_LOG_RESPONSE = "log_response"
 
 # Remote logging configuration
-LOG_BUFFER_SIZE = 100  # Number of log lines to keep
+LOG_BUFFER_SIZE = 70  # Number of log lines to keep
 LOG_ENTRY_LINE_LEN = 256  # Max characters per line
 
 SAMPLE_MSG_PATH = os.path.join(os.path.dirname(__file__), "..", "main", "samplenodemsg.json")
@@ -183,62 +183,6 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
     
     # Create log buffer for this node
     log_buffer = LogBuffer()
-    
-    # Simulate realistic ESP-IDF boot sequence logs (matches actual ESP32-C3 output)
-    boot_logs = [
-        "ets Jun  8 2016 00:22:57 rst:0x1 (POWERON_RESET),boot mode:(0,0)",
-        "I (27) boot: ESP-IDF v5.5.0-dirty 2nd stage bootloader",
-        "I (27) boot: Compile time: Dec  2 2025 14:23:45",
-        "I (27) boot: Enabling RNG early entropy source...",
-        "I (35) boot: SPI Speed: 40MHz",
-        "I (39) boot: SPI Mode: DIO",
-        "I (43) boot: SPI Flash Size: 4MB",
-        "I (47) boot: Partition Table:",
-        "I (50) boot:  # Label            Usage          Type ST Offset   Length",
-        "I (58) boot:  0 nvs              NVRAM          data 01 00009000 00006000",
-        "I (65) boot:  1 otadata          OTA data       data 01 0000f000 00002000",
-        "I (73) boot:  2 ota_0            OTA app        app  00 00011000 001f4c00",
-        "I (80) boot:  3 ota_1            OTA app        app  00 00205c00 001f4c00",
-        "I (88) boot: End of partition table",
-        "I (92) boot: Verification took 2468 ms (successful)",
-        "I (93) esp_image: segment 0: paddr=00011020 vaddr=42000020 size=0c1fch ( 49660) map",
-        "I (109) esp_image: segment 1: paddr=0001d224 vaddr=3fc92c00 size=030c4h ( 12480) load",
-        "I (115) esp_image: segment 2: paddr=000202f0 vaddr=403bc000 size=00d4ch (  3404) load",
-        "I (120) esp_image: segment 3: paddr=0002101c vaddr=403bc000 size=00a28h (  2600) load",
-        "I (127) esp_image: segment 4: paddr=0002ba44 vaddr=50000000 size=00001h (     1) load",
-        "I (132) esp_image: Calculated digest: e7d4a5e8f0c2b1f6e3a9d4c2b1a9f8e7",
-        "I (138) esp_image: Segment 0 matched",
-        "I (142) boot: Loaded app from partition at offset 0x11000",
-        "I (148) boot: Disabling RNG early entropy source...",
-        "I (154) cpu_start: Unicore bootloader",
-        "I (158) cpu_start: Single core mode",
-        "I (162) cpu_start: Pro cpu start user code",
-        "I (162) cpu_start: cpu freq: 160 MHz",
-        "I (162) cpu_start: Application information:",
-        "I (165) cpu_start:   Project name:     FloraLink",
-        "I (171) cpu_start:   App version:      v2.0.0-rc1",
-        "I (176) cpu_start:   Compile time:     Dec  2 2025 14:23:45",
-        "I (182) cpu_start:   ELF file SHA256:  e7d4a5e8f0c2b1f6e3a9d4c2b1a9f8e7",
-        "I (188) cpu_start:   ESP-IDF version:  v5.5.0-dirty",
-        "I (194) heap_init: Initializing. RAM available for dynamic allocation:",
-        "I (200) heap_init: At 3FC94678, len 0004B988 (302 KiB): DRAM",
-        "I (207) heap_init: At 3FCE0000, len 00020000 (128 KiB): STACK/DRAM",
-        "I (213) heap_init: At 50000000, len 00000001 (0 KiB): RTCRAM",
-        "I (219) heap_init: Total dynamic heap size: 314 KiB",
-        "I (225) spi_flash: detected chip generic",
-        "I (229) spi_flash: flash io: drv=0x00 freq=40 mode=2",
-        "I (235) app_start: Starting scheduler on 0 CPU",
-        "I (240) main: Starting app_main()...",
-        f"I (245) nodeio: Initializing NodeIO subsystem (node_id={node_id})...",
-        "I (250) websock: WebSocket server listening on 0.0.0.0:80",
-        "I (256) wifi: WiFi connecting to network...",
-        "I (300) wifi: WiFi connected, IP: 192.168.1.100",
-        f"I (310) nodeio: NodeIO initialized successfully",
-        "I (315) main: Application started successfully",
-    ]
-    
-    for boot_log in boot_logs:
-        log_buffer.add(boot_log)
 
     try:
         # === Connect phase ===
@@ -341,7 +285,7 @@ async def simulate_node(uri, node_id, interval, sample_msg, control_event, log_e
                                         config["subscribed"] = False
                                     control_event.clear()
                                     if log_enabled.is_set():
-                                        print(f"[Node {node_id}] Unsubscribed by hub")
+                                        print(f"[Node {node_id}] Hub yet to subscribe")
 
                             # log_request: send log buffer contents (matches hub's MSG_LOG_REQUEST handling)
                             elif mtype == "log_request":

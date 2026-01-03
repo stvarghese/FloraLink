@@ -1011,7 +1011,7 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
         }
         if ((*pp_session)->client_fd == client_fd && (*pp_node)->current_state == NODEIO_STATE_CONNECTED)
         {
-            ESP_LOGI(TAG, "Received log response from node %d", node_id);
+            ESP_LOGD(TAG, "Received log response from node %d", node_id);
 
             // Extract payload
             cJSON *payload = cJSON_GetObjectItem(root, "payload");
@@ -1036,7 +1036,7 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
             int total_lines = total_lines_item->valueint;
             int logs_count = cJSON_GetArraySize(logs_array);
 
-            ESP_LOGI(TAG, "Node %d log response: total_lines=%d, received=%d lines",
+            ESP_LOGD(TAG, "Node %d log response: total_lines=%d, received=%d lines",
                      node_id, total_lines, logs_count);
 
             // Acquire lock before modifying logs
@@ -1092,7 +1092,7 @@ static void nodeio_handle_message(int client_fd, const char *data, size_t len)
                     }
                     (*pp_node)->log_timestamp = time(NULL);
                     (*pp_node)->logs_available = true;
-                    ESP_LOGI(TAG, "Stored %d log lines for node %d", (*pp_node)->log_count, node_id);
+                    ESP_LOGD(TAG, "Stored %d log lines for node %d", (*pp_node)->log_count, node_id);
                 }
                 else
                 {

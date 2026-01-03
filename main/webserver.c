@@ -379,13 +379,13 @@ static esp_err_t request_logs_post_handler(httpd_req_t *req)
         httpd_resp_set_type(req, "application/json");
         char error_buf[128];
         snprintf(error_buf, sizeof(error_buf),
-                 "{\"ok\":false,\"error\":\"%s\"}\n", esp_err_to_name(err));
+                 "{\"status\":\"error\",\"message\":\"%s\"}\n", esp_err_to_name(err));
         httpd_resp_sendstr(req, error_buf);
         return ESP_OK;
     }
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"ok\":true,\"status\":\"requested\"}\n");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\",\"message\":\"Log request sent to node\"}\n");
     return ESP_OK;
 }
 
@@ -476,15 +476,6 @@ static esp_err_t get_node_logs_handler(httpd_req_t *req)
 #define MAX_LOG_RESPONSE_SIZE (64 * 1024) // 64KB max JSON response
 #define BATCH_SIZE 2048
 
-    // Build JSON response with logs
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"status\":\"available\",\"total_lines\":");
-
-    char num_buf[16];
-    snprintf(num_buf, sizeof(num_buf), "%d", p_node->log_count);
-    httpd_resp_sendstr(req, num_buf);
-    httpd_resp_sendstr(req, ",\"logs\":[");
-
     // Use batching to reduce overhead
     char *batch_buf = malloc(BATCH_SIZE);
     if (!batch_buf)
@@ -493,6 +484,15 @@ static esp_err_t get_node_logs_handler(httpd_req_t *req)
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
+
+    // Build JSON response with logs
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr_chunk(req, "{\"status\":\"available\",\"total_lines\":");
+
+    char num_buf[16];
+    snprintf(num_buf, sizeof(num_buf), "%d", p_node->log_count);
+    httpd_resp_sendstr_chunk(req, num_buf);
+    httpd_resp_sendstr_chunk(req, ",\"logs\":[");
 
     int batch_offset = 0;
     size_t total_response_size = 0;
@@ -505,8 +505,8 @@ static esp_err_t get_node_logs_handler(httpd_req_t *req)
             if (written < 0 || batch_offset + written >= BATCH_SIZE - 100)
             {
                 httpd_resp_sendstr(req, batch_buf);
+                total_response_size += batch_offset;
                 batch_offset = 0;
-                total_response_size += strlen(batch_buf);
                 if (total_response_size > MAX_LOG_RESPONSE_SIZE)
                 {
                     ESP_LOGW("WebServer", "Log response exceeds max size, truncating");
@@ -559,9 +559,9 @@ static esp_err_t get_node_logs_handler(httpd_req_t *req)
         // Flush batch if getting full
         if (batch_offset > BATCH_SIZE - 200)
         {
-            httpd_resp_sendstr(req, batch_buf);
+            httpd_resp_sendstr_chunk(req, batch_buf);
+            total_response_size += batch_offset;
             batch_offset = 0;
-            total_response_size += strlen(batch_buf);
             if (total_response_size > MAX_LOG_RESPONSE_SIZE)
             {
                 ESP_LOGW("WebServer", "Log response size limit reached");
@@ -573,13 +573,14 @@ static esp_err_t get_node_logs_handler(httpd_req_t *req)
     // Send remaining batch
     if (batch_offset > 0)
     {
-        httpd_resp_sendstr(req, batch_buf);
+        httpd_resp_sendstr_chunk(req, batch_buf);
     }
 
     free(batch_buf);
     nodeio_unlock_logs();
 
-    httpd_resp_sendstr(req, "]}\n");
+    httpd_resp_sendstr_chunk(req, "]}\n");
+    httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
 }
 
